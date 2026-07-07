@@ -407,6 +407,9 @@ function Dashboard({ result }) {
   };
   const shownSeries = filterByDate(result.series[selMetric]);
   const rangeActive = fromDate !== minDate || toDate !== maxDate;
+  const inRange = (d) => (!fromDate || d >= fromDate) && (!toDate || d <= toDate);
+  const shownAnomalies = result.anomalies.filter((a) => inRange(a.date));
+  const shownInsights = (result.insights || []).filter((i) => inRange(i.date));
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -469,12 +472,12 @@ function Dashboard({ result }) {
 
       <div>
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
-          <span className="hint">${result.anomalies.length} flagged · ranked by recency & severity</span>
+          <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ranked by recency & severity</span>
         </div>
-        ${result.anomalies.length === 0
-          ? html`<div className="card empty">✓ No significant day-on-day anomalies in this view. Metrics moved within normal ranges.</div>`
+        ${shownAnomalies.length === 0
+          ? html`<div className="card empty">✓ ${rangeActive ? "No anomalies in the selected date range." : "No significant day-on-day anomalies in this view. Metrics moved within normal ranges."}</div>`
           : html`<div className="anoms">
-              ${result.anomalies.slice(0, 12).map(
+              ${shownAnomalies.slice(0, 12).map(
                 (a, i) => html`<div key=${i} className="card anom" onClick=${() => setSelMetric(a.metric)} style=${{ cursor: "pointer" }}>
                   <div className=${"sev-bar sev-" + a.severity}></div>
                   <div>
@@ -490,13 +493,13 @@ function Dashboard({ result }) {
             </div>`}
       </div>
 
-      ${result.insights && result.insights.length > 0 &&
+      ${shownInsights.length > 0 &&
       html`<div>
         <div className="section-title">Root-cause insights ${result.mode === "llm" ? "" : "(statistical)"}
           <span className="hint">Tailored to ${result.division}</span>
         </div>
         <div className="stack">
-          ${result.insights.map(
+          ${shownInsights.map(
             (ins, i) => html`<div key=${i} className="card insight">
               <div className="rowflex">
                 <div>
