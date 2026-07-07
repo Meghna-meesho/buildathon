@@ -63,6 +63,9 @@ a { color: var(--plum-700); }
 .login-head .logo { width: 52px; height: 52px; border-radius: 14px; background: var(--plum); color: var(--amber); font-family: Georgia, serif; font-weight: 800; font-size: 32px; display: grid; place-items: center; margin: 0 auto 14px; }
 .login-head h1 { font-size: 21px; margin: 0 0 6px; }
 .login-head p { color: var(--muted); font-size: 14px; margin: 0; }
+.wordmark { font-weight: 800; font-size: 22px; letter-spacing: -0.015em; margin: 2px 0 14px; }
+.wm-meesho { color: var(--plum); }
+.wm-grocery { color: #3f9e2e; }
 label.field { display: block; margin-bottom: 14px; font-size: 13px; font-weight: 600; color: #40383e; }
 label.field span { display:block; margin-bottom: 6px; }
 input, select {

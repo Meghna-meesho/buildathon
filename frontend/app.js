@@ -24,15 +24,27 @@ function fmtNum(n) {
 }
 const cap = (s) => (s || "").replace(/[_\-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
+/* Meesho Grocery mark (inline SVG — green grocery bag + orange/cream sack) */
+function MGLogo({ size = 36 }) {
+  return html`<svg viewBox="0 0 48 48" width=${size} height=${size}
+      style=${{ display: "block" }} role="img" aria-label="Meesho Grocery">
+    <path d="M17 16v-3.2a7 7 0 0 1 14 0V16" fill="none" stroke="#57bb46" stroke-width="3" stroke-linecap="round" />
+    <path d="M9.5 15h29l-2.1 26.2a3 3 0 0 1-3 2.8H14.6a3 3 0 0 1-3-2.8Z" fill="#57bb46" />
+    <path d="M16 33c0-3.4 3.6-6.2 8-6.2s8 2.8 8 6.2z" fill="#f7e3c1" />
+    <rect x="16" y="33" width="16" height="11.2" rx="2.4" fill="#f7961e" />
+    <rect x="16" y="36.6" width="16" height="2.4" fill="#e07d00" />
+  </svg>`;
+}
+
 /* ----------------------------- Top bar ----------------------------- */
 function TopBar({ session, onLogout, onReset }) {
   return html`
     <div className="topbar">
       <div className="brand">
-        <div className="logo">m</div>
+        <${MGLogo} size=${38} />
         <div>
-          <div className="title">Insight Lens</div>
-          <div className="subtitle">Anomaly Detector &amp; RCA Engine</div>
+          <div className="title">ADD - MG</div>
+          <div className="subtitle">Anomaly Detection Dashboard · Meesho Grocery</div>
         </div>
       </div>
       ${session &&
@@ -82,9 +94,12 @@ function Login({ onLogin }) {
     <div className="center-wrap">
       <form className="card login-card" onSubmit=${submit}>
         <div className="login-head">
-          <div className="logo">m</div>
-          <h1>Welcome to Insight Lens</h1>
-          <p>Sign in and pick your division to see the anomalies and root causes that matter to you.</p>
+          <div style=${{ display: "flex", justifyContent: "center", marginBottom: 6 }}>
+            <${MGLogo} size=${56} />
+          </div>
+          <div className="wordmark"><span className="wm-meesho">meesho</span> <span className="wm-grocery">grocery</span></div>
+          <h1>Welcome to ADD - MG</h1>
+          <p>Anomaly Detection Dashboard — sign in and pick your division to see the day-on-day anomalies that matter to you.</p>
         </div>
         <label className="field"><span>Username</span>
           <input value=${username} onInput=${(e) => setUsername(e.target.value)} placeholder="e.g. meghna.verma" autoFocus />
@@ -279,8 +294,7 @@ function Setup({ session, onDone }) {
           </table>
         </div>
 
-        <div className="rowflex" style=${{ marginTop: 6 }}>
-          <span className="muted">Analysing as <strong>${session.division}</strong>. Insights will be tailored to your division.</span>
+        <div className="rowflex" style=${{ marginTop: 6, justifyContent: "flex-end" }}>
           <button className="btn amber wauto" disabled=${analyzing || !dateCol || metricCols.length === 0} onClick=${analyze}>
             ${analyzing ? html`<span className="spinner"></span> Analysing…` : "Detect anomalies & explain →"}
           </button>
@@ -352,11 +366,39 @@ function TrendChart({ series, metric, anomalies }) {
   return html`<div className="chart-box"><canvas ref=${canvasRef}></canvas></div>`;
 }
 
+/* Tabular view of a metric's series (newest first), anomalies highlighted */
+function TrendTable({ series, metric, anomalies }) {
+  const anom = {};
+  (anomalies || []).filter((a) => a.metric === metric).forEach((a) => { anom[a.date] = a; });
+  const { labels, values } = series;
+  const rows = labels.map((d, i) => ({ d, v: values[i], prev: i > 0 ? values[i - 1] : null })).reverse();
+  return html`
+    <div className="tablewrap" style=${{ maxHeight: 320, overflowY: "auto" }}>
+      <table className="preview">
+        <thead><tr><th>Date</th><th>${cap(metric)}</th><th>Day-on-day</th><th>Status</th></tr></thead>
+        <tbody>
+          ${rows.map(({ d, v, prev }) => {
+            const dod = prev ? ((v - prev) / Math.abs(prev)) * 100 : null;
+            const a = anom[d];
+            const cls = dod > 0 ? "up" : dod < 0 ? "down" : "";
+            return html`<tr key=${d} style=${a ? { background: "#fdf3f4" } : {}}>
+              <td>${d}</td>
+              <td>${fmtNum(v)}</td>
+              <td className=${cls}>${dod === null ? "—" : (dod > 0 ? "+" : "") + dod.toFixed(1) + "%"}</td>
+              <td>${a ? html`<span className=${"badge " + a.severity}>${a.severity}</span>` : ""}</td>
+            </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 /* ----------------------------- Dashboard ----------------------------- */
 function Dashboard({ result }) {
   const metricsWithData = Object.keys(result.series || {});
   const firstAnomMetric = result.anomalies && result.anomalies[0] ? result.anomalies[0].metric : null;
   const [selMetric, setSelMetric] = useState(firstAnomMetric || metricsWithData[0] || "");
+  const [view, setView] = useState("chart");
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -392,13 +434,21 @@ function Dashboard({ result }) {
       ${selMetric &&
       html`<div className="card chart-card">
         <div className="chart-head">
-          <div className="section-title" style=${{ margin: 0 }}>Trend · ${cap(selMetric)}</div>
-          <select className="metric-select" value=${selMetric} onChange=${(e) => setSelMetric(e.target.value)}>
-            ${metricsWithData.map((m) => html`<option key=${m} value=${m}>${cap(m)}</option>`)}
-          </select>
+          <div className="section-title" style=${{ margin: 0 }}>${view === "chart" ? "Trend" : "Data"} · ${cap(selMetric)}</div>
+          <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div className="seg">
+              <button className=${view === "chart" ? "on" : ""} onClick=${() => setView("chart")}>Chart</button>
+              <button className=${view === "table" ? "on" : ""} onClick=${() => setView("table")}>Table</button>
+            </div>
+            <select className="metric-select" value=${selMetric} onChange=${(e) => setSelMetric(e.target.value)}>
+              ${metricsWithData.map((m) => html`<option key=${m} value=${m}>${cap(m)}</option>`)}
+            </select>
+          </div>
         </div>
-        <${TrendChart} series=${result.series[selMetric]} metric=${selMetric} anomalies=${result.anomalies} />
-        <div className="muted" style=${{ fontSize: 12, marginTop: 8 }}>Coloured points mark detected anomalies. Hover for details.</div>
+        ${view === "chart"
+          ? html`<${TrendChart} series=${result.series[selMetric]} metric=${selMetric} anomalies=${result.anomalies} />
+              <div className="muted" style=${{ fontSize: 12, marginTop: 8 }}>Coloured points mark detected anomalies. Hover for details.</div>`
+          : html`<${TrendTable} series=${result.series[selMetric]} metric=${selMetric} anomalies=${result.anomalies} />`}
       </div>`}
 
       <div>
@@ -438,10 +488,6 @@ function Dashboard({ result }) {
                   <h4>${ins.title}</h4>
                 </div>
                 <span className=${"conf " + (ins.confidence || "medium")}>${ins.confidence || "medium"} confidence</span>
-              </div>
-              <div className="block">
-                <div className="h">Likely root causes</div>
-                <ul>${(ins.root_causes || []).map((r, j) => html`<li key=${j}>${r}</li>`)}</ul>
               </div>
               <div className="block">
                 <div className="h">Business impact</div>
