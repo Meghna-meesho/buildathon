@@ -445,8 +445,8 @@ function Dashboard({ result }) {
       </div>`}
 
       <div>
-        <div className="section-title">Detected anomalies
-          <span className="hint">${result.anomalies.length} flagged · most recent and biggest changes first</span>
+        <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
+          <span className="hint">${result.anomalies.length} flagged · ranked by recency & severity</span>
         </div>
         ${result.anomalies.length === 0
           ? html`<div className="card empty">✓ No significant day-on-day anomalies in this view. Metrics moved within normal ranges.</div>`
