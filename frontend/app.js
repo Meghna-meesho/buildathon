@@ -13,12 +13,6 @@ async function apiJSON(path, body) {
   if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
   return data;
 }
-async function apiForm(path, formData) {
-  const res = await fetch(path, { method: "POST", body: formData });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
-  return data;
-}
 
 /* ----------------------------- formatting ----------------------------- */
 function fmtNum(n) {
@@ -75,11 +69,7 @@ function Login({ onLogin }) {
     setErr("");
     setBusy(true);
     try {
-      const fd = new FormData();
-      fd.append("username", username);
-      fd.append("password", password);
-      fd.append("division", division);
-      const s = await apiForm("/api/login", fd);
+      const s = await apiJSON("/api/login", { username, password, division });
       onLogin(s);
     } catch (e2) {
       setErr(e2.message);
@@ -138,9 +128,8 @@ function Setup({ session, onDone }) {
     setErr("");
     setUploading(true);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const data = await apiForm("/api/upload", fd);
+      const content = await file.text();
+      const data = await apiJSON("/api/upload", { filename: file.name, content });
       setInfo(data);
       setDateCol(data.inferred.date_col || "");
       setMetricCols(data.inferred.metric_cols || []);

@@ -58,9 +58,12 @@ def _parse_number(v):
         return None
 
 
-def parse_csv(raw_bytes: bytes):
-    """Parse raw CSV bytes into headers + list-of-dict rows."""
-    text = raw_bytes.decode("utf-8-sig", errors="replace")
+def parse_csv(raw):
+    """Parse CSV bytes or text into headers + list-of-dict rows."""
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(raw).lstrip("﻿")  # strip a leading BOM if present
     reader = csv.DictReader(io.StringIO(text))
     headers = reader.fieldnames or []
     rows = [dict(r) for r in reader]

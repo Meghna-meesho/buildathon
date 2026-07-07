@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -40,10 +40,14 @@ def divisions():
 
 
 @app.post("/api/login")
-async def login(username: str = Form(...), password: str = Form(...), division: str = Form(...)):
-    if not username.strip() or not password.strip():
+async def login(payload: dict):
+    # JSON body (not multipart) so it passes strict corporate proxies/DLP.
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", "")).strip()
+    division = str(payload.get("division", "")).strip()
+    if not username or not password:
         raise HTTPException(400, "Username and password are required.")
-    if not division.strip():
+    if not division:
         raise HTTPException(400, "Please select a business division.")
     token = base64.urlsafe_b64encode(f"{username}:{division}".encode()).decode()
     return {"token": token, "username": username, "division": division}
@@ -53,14 +57,17 @@ async def login(username: str = Form(...), password: str = Form(...), division: 
 # Upload + profiling
 # --------------------------------------------------------------------------- #
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".csv"):
+async def upload(payload: dict):
+    # The browser reads the file and sends its text as JSON, so there is no
+    # multipart file upload for corporate proxies/DLP to block.
+    filename = str(payload.get("filename", "data.csv"))
+    content = payload.get("content")
+    if not filename.lower().endswith(".csv"):
         raise HTTPException(400, "Please upload a .csv file.")
-    raw = await file.read()
-    if not raw:
+    if not content:
         raise HTTPException(400, "The uploaded file is empty.")
     try:
-        headers, rows = parse_csv(raw)
+        headers, rows = parse_csv(content)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"Could not parse CSV: {e}")
     if not headers or not rows:
@@ -75,7 +82,7 @@ async def upload(file: UploadFile = File(...)):
 
     return {
         "upload_id": upload_id,
-        "filename": file.filename,
+        "filename": filename,
         "row_count": len(rows),
         "columns": cols,
         "inferred": inferred,
