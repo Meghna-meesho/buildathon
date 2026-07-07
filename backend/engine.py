@@ -489,7 +489,7 @@ def _fallback_insights(division, metric_stats, anomalies):
 
 
 def generate_rca(division, analysis_result):
-    """Return {executive_summary, insights, mode, notice?}."""
+    """Return {executive_summary, insights, mode}."""
     metric_stats = analysis_result["metric_stats"]
     anomalies = analysis_result["anomalies"]
     if os.getenv("ANTHROPIC_API_KEY"):
@@ -497,12 +497,10 @@ def generate_rca(division, analysis_result):
             out = _llm_insights(division, metric_stats, anomalies)
             out["mode"] = "llm"
             return out
-        except Exception as e:  # noqa: BLE001 — any failure degrades gracefully
+        except Exception:  # noqa: BLE001 — any failure degrades gracefully to stats
             out = _fallback_insights(division, metric_stats, anomalies)
             out["mode"] = "statistical"
-            out["notice"] = f"LLM analysis unavailable ({type(e).__name__}); showing statistical insights."
             return out
     out = _fallback_insights(division, metric_stats, anomalies)
     out["mode"] = "statistical"
-    out["notice"] = "Set ANTHROPIC_API_KEY to enable AI-written root-cause narratives."
     return out
