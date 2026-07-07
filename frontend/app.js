@@ -116,7 +116,7 @@ function Login({ onLogin }) {
             <${MGLogo} size=${64} />
           </div>
           <h1>Welcome to ADD - MG</h1>
-          <p>Anomaly Detection Dashboard — sign in and pick your division to see the day-on-day anomalies that matter to you.</p>
+          <p>Anomaly Detection Dashboard — visualize trends that matter to you.</p>
         </div>
         <label className="field"><span>Username</span>
           <input value=${username} onInput=${(e) => setUsername(e.target.value)} placeholder="e.g. meghna.verma" autoFocus />
