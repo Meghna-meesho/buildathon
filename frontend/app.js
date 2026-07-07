@@ -500,8 +500,7 @@ function Dashboard({ result }) {
                     <div className="anom-chev">${isOpen ? "▲" : "▼"}</div>
                   </div>
                   ${isOpen && ins && html`<div className="anom-body">
-                    <div className="rowflex" style=${{ marginBottom: 2 }}>
-                      <div className="tag">Root cause</div>
+                    <div className="rowflex" style=${{ justifyContent: "flex-end", marginBottom: 4 }}>
                       <span className=${"conf " + (ins.confidence || "medium")}>${ins.confidence || "medium"} confidence</span>
                     </div>
                     <div className="block">
