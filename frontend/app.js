@@ -24,6 +24,30 @@ function fmtNum(n) {
 }
 const cap = (s) => (s || "").replace(/[_\-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
+/* rate/ratio-like metrics are averaged when bucketing; counts are summed */
+const AVG_HINTS = ["rate", "pct", "percent", "ratio", "avg", "average", "mean", "nps", "score", "cpdo", "aov", "distance", "retention", "share"];
+const isAvgMetric = (n) => { const s = (n || "").toLowerCase(); return AVG_HINTS.some((h) => s.includes(h)); };
+
+/* aggregate a daily series into 7-day (weekly) buckets anchored at the first date */
+function toWeekly(series, avg) {
+  const out = { labels: [], values: [], dateToWeek: {} };
+  if (!series || !series.labels || !series.labels.length) return out;
+  const first = new Date(series.labels[0] + "T00:00:00").getTime();
+  const wkOf = (d) => Math.floor((new Date(d + "T00:00:00").getTime() - first) / (7 * 86400000));
+  const buckets = {};
+  series.labels.forEach((d, i) => {
+    const wk = wkOf(d);
+    if (!buckets[wk]) buckets[wk] = { sum: 0, count: 0, start: d };
+    buckets[wk].sum += series.values[i];
+    buckets[wk].count += 1;
+  });
+  const keys = Object.keys(buckets).map(Number).sort((a, b) => a - b);
+  out.labels = keys.map((k) => buckets[k].start);
+  out.values = keys.map((k) => Number((avg ? buckets[k].sum / buckets[k].count : buckets[k].sum).toFixed(4)));
+  series.labels.forEach((d) => { out.dateToWeek[d] = buckets[wkOf(d)].start; });
+  return out;
+}
+
 /* Meesho Grocery logo (official lockup) */
 function MGLogo({ size = 36 }) {
   return html`<img src="/mg-logo.png" alt="Meesho Grocery"
@@ -360,15 +384,16 @@ function TrendChart({ series, metric, anomalies }) {
 }
 
 /* Tabular view of a metric's series (newest first), anomalies highlighted */
-function TrendTable({ series, metric, anomalies }) {
+function TrendTable({ series, metric, anomalies, periodLabel }) {
   const anom = {};
   (anomalies || []).filter((a) => a.metric === metric).forEach((a) => { anom[a.date] = a; });
   const { labels, values } = series;
   const rows = labels.map((d, i) => ({ d, v: values[i], prev: i > 0 ? values[i - 1] : null })).reverse();
+  const dateHeader = (periodLabel || "").indexOf("Week") === 0 ? "Week of" : "Date";
   return html`
     <div className="tablewrap" style=${{ maxHeight: 320, overflowY: "auto" }}>
       <table className="preview">
-        <thead><tr><th>Date</th><th>${cap(metric)}</th><th>Day-on-day</th><th>Status</th></tr></thead>
+        <thead><tr><th>${dateHeader}</th><th>${cap(metric)}</th><th>${periodLabel || "Day-on-day"}</th><th>Status</th></tr></thead>
         <tbody>
           ${rows.map(({ d, v, prev }) => {
             const dod = prev ? ((v - prev) / Math.abs(prev)) * 100 : null;
@@ -399,6 +424,20 @@ function Dashboard({ result }) {
   const [toDate, setToDate] = useState(maxDate);
   const [openAnom, setOpenAnom] = useState({});
   const toggleAnom = (k) => setOpenAnom((o) => ({ ...o, [k]: !o[k] }));
+  const [gran, setGran] = useState("daily");
+  const weekly = gran === "weekly" ? toWeekly(shownSeries, isAvgMetric(selMetric)) : null;
+  const displaySeries = weekly ? { labels: weekly.labels, values: weekly.values } : shownSeries;
+  let displayAnoms = result.anomalies;
+  if (weekly) {
+    const sevRank = { moderate: 1, high: 2, critical: 3 };
+    const byWeek = {};
+    result.anomalies.filter((a) => a.metric === selMetric && inRange(a.date)).forEach((a) => {
+      const ws = weekly.dateToWeek[a.date];
+      if (!ws) return;
+      if (!byWeek[ws] || sevRank[a.severity] > sevRank[byWeek[ws].severity]) byWeek[ws] = { ...a, date: ws };
+    });
+    displayAnoms = Object.values(byWeek);
+  }
   const filterByDate = (s) => {
     if (!s) return { labels: [], values: [] };
     const o = { labels: [], values: [] };
@@ -421,17 +460,8 @@ function Dashboard({ result }) {
 
   return html`
     <div className="wrap stack">
-      <div className="summary-banner">
-        <div className="eyebrow">Executive summary — ${result.division}${dimLabel}</div>
-        <p>${result.executive_summary}</p>
-        <span className=${"mode-badge " + result.mode}>
-          ${result.mode === "llm" ? "✦ AI root-cause analysis" : "▣ Statistical analysis"}
-        </span>
-        ${result.notice && html`<div className="notice">${result.notice}</div>`}
-      </div>
-
       <div>
-        <div className="section-title">Key metrics · latest vs. previous day</div>
+        <div className="section-title">Key metrics <span style=${{ color: "var(--plum)" }}>· latest vs. previous day</span></div>
         <div className="kpis">
           ${result.kpis.map((k) => {
             const cls = k.dod_change > 0 ? "up" : k.dod_change < 0 ? "down" : "flat";
@@ -449,11 +479,15 @@ function Dashboard({ result }) {
       ${selMetric &&
       html`<div className="card chart-card">
         <div className="chart-head">
-          <div className="section-title" style=${{ margin: 0 }}>${view === "chart" ? "Trend" : "Data"} · ${cap(selMetric)}</div>
+          <div className="section-title" style=${{ margin: 0 }}>${view === "chart" ? "Trend" : "Data"} · ${cap(selMetric)}${gran === "weekly" ? " · weekly" : ""}</div>
           <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <div className="seg">
               <button className=${view === "chart" ? "on" : ""} onClick=${() => setView("chart")}>Chart</button>
               <button className=${view === "table" ? "on" : ""} onClick=${() => setView("table")}>Table</button>
+            </div>
+            <div className="seg">
+              <button className=${gran === "daily" ? "on" : ""} onClick=${() => setGran("daily")}>Daily</button>
+              <button className=${gran === "weekly" ? "on" : ""} onClick=${() => setGran("weekly")}>Weekly</button>
             </div>
             <div className="daterange">
               <input type="date" value=${fromDate} min=${minDate} max=${maxDate} onChange=${(e) => setFromDate(e.target.value)} />
@@ -466,19 +500,19 @@ function Dashboard({ result }) {
             </select>
           </div>
         </div>
-        ${shownSeries.labels.length === 0
+        ${displaySeries.labels.length === 0
           ? html`<div className="empty">No data in the selected date range.</div>`
           : view === "chart"
-          ? html`<${TrendChart} series=${shownSeries} metric=${selMetric} anomalies=${result.anomalies} />
+          ? html`<${TrendChart} series=${displaySeries} metric=${selMetric} anomalies=${displayAnoms} />
               <div className="muted" style=${{ fontSize: 12, marginTop: 8 }}>Coloured points mark detected anomalies. Hover for details.</div>`
-          : html`<${TrendTable} series=${shownSeries} metric=${selMetric} anomalies=${result.anomalies} />`}
+          : html`<${TrendTable} series=${displaySeries} metric=${selMetric} anomalies=${displayAnoms} periodLabel=${gran === "weekly" ? "Week-on-week" : "Day-on-day"} />`}
       </div>`}
 
       <div>
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
           <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ranked by recency & severity</span>
         </div>
-        ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click an anomaly to expand its root cause ▾</div>`}
+        ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click an anomaly to see details</div>`}
         ${shownAnomalies.length === 0
           ? html`<div className="card empty">✓ ${rangeActive ? "No anomalies in the selected date range." : "No significant day-on-day anomalies in this view. Metrics moved within normal ranges."}</div>`
           : html`<div className="anoms">

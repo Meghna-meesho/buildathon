@@ -27,8 +27,7 @@ app = FastAPI(title="Anomaly Detector & RCA Engine")
 _UPLOADS: dict[str, dict] = {}
 _MAX_UPLOADS = 20
 
-DIVISIONS = ["Grocery", "Fashion", "Electronics", "Beauty & Personal Care",
-             "Home & Kitchen", "Growth / Marketing", "Finance / Leadership", "Other"]
+DIVISIONS = ["Grocery", "Growth", "Valmo"]
 
 
 # --------------------------------------------------------------------------- #
@@ -148,7 +147,10 @@ async def dimension_values(payload: dict):
 # --------------------------------------------------------------------------- #
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+    return FileResponse(
+        os.path.join(FRONTEND_DIR, "index.html"),
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 @app.get("/health")
