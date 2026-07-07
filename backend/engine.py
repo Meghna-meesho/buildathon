@@ -395,7 +395,7 @@ def _llm_insights(division, metric_stats, anomalies):
     import anthropic  # imported lazily so the app runs without the package for stats-only mode
 
     client = anthropic.Anthropic()
-    top = anomalies[:8]
+    top = anomalies[:15]
     by_date = _by_date(anomalies)
     payload = {
         "division": division,
@@ -448,7 +448,7 @@ def _fallback_insights(division, metric_stats, anomalies):
     by_date = _by_date(anomalies)
     sev_word = {"critical": "major", "high": "sharp", "moderate": "notable"}
     insights = []
-    for a in anomalies[:8]:
+    for a in anomalies:  # one insight per detected anomaly
         metric_h = _humanize(a["metric"])
         cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
         others = [_humanize(x["metric"]) for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]]

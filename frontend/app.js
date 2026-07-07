@@ -23,6 +23,7 @@ function fmtNum(n) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n);
 }
 const cap = (s) => (s || "").replace(/[_\-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const insId = (metric, date) => "ins-" + (metric + "-" + date).replace(/[^A-Za-z0-9]+/g, "-");
 
 /* Meesho Grocery logo (official lockup) */
 function MGLogo({ size = 36 }) {
@@ -409,7 +410,14 @@ function Dashboard({ result }) {
   const rangeActive = fromDate !== minDate || toDate !== maxDate;
   const inRange = (d) => (!fromDate || d >= fromDate) && (!toDate || d <= toDate);
   const shownAnomalies = result.anomalies.filter((a) => inRange(a.date));
-  const shownInsights = (result.insights || []).filter((i) => inRange(i.date));
+  const listed = shownAnomalies.slice(0, 24);
+  const insByKey = {};
+  (result.insights || []).forEach((i) => { insByKey[i.metric + "|" + i.date] = i; });
+  function goToInsight(a) {
+    setSelMetric(a.metric);
+    const el = document.getElementById(insId(a.metric, a.date));
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -474,11 +482,12 @@ function Dashboard({ result }) {
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
           <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ranked by recency & severity</span>
         </div>
+        ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click any anomaly to jump to its root cause ↓</div>`}
         ${shownAnomalies.length === 0
           ? html`<div className="card empty">✓ ${rangeActive ? "No anomalies in the selected date range." : "No significant day-on-day anomalies in this view. Metrics moved within normal ranges."}</div>`
           : html`<div className="anoms">
-              ${shownAnomalies.slice(0, 12).map(
-                (a, i) => html`<div key=${i} className="card anom" onClick=${() => setSelMetric(a.metric)} style=${{ cursor: "pointer" }}>
+              ${listed.map(
+                (a, i) => html`<div key=${i} className="card anom" onClick=${() => goToInsight(a)} style=${{ cursor: "pointer" }} title="Click to see the root cause">
                   <div className=${"sev-bar sev-" + a.severity}></div>
                   <div>
                     <div><span className="metricname">${cap(a.metric)}</span>
@@ -493,14 +502,16 @@ function Dashboard({ result }) {
             </div>`}
       </div>
 
-      ${shownInsights.length > 0 &&
+      ${listed.length > 0 &&
       html`<div>
         <div className="section-title">Root-cause insights ${result.mode === "llm" ? "" : "(statistical)"}
           <span className="hint">Tailored to ${result.division}</span>
         </div>
         <div className="stack">
-          ${shownInsights.map(
-            (ins, i) => html`<div key=${i} className="card insight">
+          ${listed.map((a, i) => {
+            const ins = insByKey[a.metric + "|" + a.date];
+            if (!ins) return null;
+            return html`<div key=${i} id=${insId(ins.metric, ins.date)} className="card insight">
               <div className="rowflex">
                 <div>
                   <div className="tag">${cap(ins.metric)} · ${ins.date || ""}</div>
@@ -516,8 +527,8 @@ function Dashboard({ result }) {
                 <div className="h">Recommended next steps</div>
                 <ul>${(ins.recommendations || []).map((r, j) => html`<li key=${j}>${r}</li>`)}</ul>
               </div>
-            </div>`
-          )}
+            </div>`;
+          })}
         </div>
       </div>`}
     </div>
