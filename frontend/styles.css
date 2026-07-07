@@ -140,6 +140,10 @@ table.preview th { background: #faf7fb; font-weight: 700; color: #40383e; positi
 .chart-head { display:flex; align-items:center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
 .chart-head .metric-select { max-width: 260px; }
 .chart-box { position: relative; height: 300px; }
+.daterange { display: flex; align-items: center; gap: 6px; }
+.daterange input[type="date"] { width: auto; padding: 7px 9px; font-size: 13px; }
+.datereset { border: 1px solid var(--line); background: #fff; color: var(--plum-700); border-radius: 8px; padding: 6px 10px; font-size: 12px; }
+.datereset:hover { background: var(--plum-100); }
 
 .anoms { display: grid; gap: 12px; }
 .anom {

@@ -392,6 +392,21 @@ function Dashboard({ result }) {
   const firstAnomMetric = result.anomalies && result.anomalies[0] ? result.anomalies[0].metric : null;
   const [selMetric, setSelMetric] = useState(firstAnomMetric || metricsWithData[0] || "");
   const [view, setView] = useState("chart");
+  const allLabels = ((result.series[metricsWithData[0]] || {}).labels) || [];
+  const minDate = allLabels[0] || "";
+  const maxDate = allLabels[allLabels.length - 1] || "";
+  const [fromDate, setFromDate] = useState(minDate);
+  const [toDate, setToDate] = useState(maxDate);
+  const filterByDate = (s) => {
+    if (!s) return { labels: [], values: [] };
+    const o = { labels: [], values: [] };
+    s.labels.forEach((d, i) => {
+      if ((!fromDate || d >= fromDate) && (!toDate || d <= toDate)) { o.labels.push(d); o.values.push(s.values[i]); }
+    });
+    return o;
+  };
+  const shownSeries = filterByDate(result.series[selMetric]);
+  const rangeActive = fromDate !== minDate || toDate !== maxDate;
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -433,15 +448,23 @@ function Dashboard({ result }) {
               <button className=${view === "chart" ? "on" : ""} onClick=${() => setView("chart")}>Chart</button>
               <button className=${view === "table" ? "on" : ""} onClick=${() => setView("table")}>Table</button>
             </div>
+            <div className="daterange">
+              <input type="date" value=${fromDate} min=${minDate} max=${maxDate} onChange=${(e) => setFromDate(e.target.value)} />
+              <span className="muted" style=${{ fontSize: 12 }}>to</span>
+              <input type="date" value=${toDate} min=${minDate} max=${maxDate} onChange=${(e) => setToDate(e.target.value)} />
+              ${rangeActive && html`<button className="datereset" onClick=${() => { setFromDate(minDate); setToDate(maxDate); }}>Reset</button>`}
+            </div>
             <select className="metric-select" value=${selMetric} onChange=${(e) => setSelMetric(e.target.value)}>
               ${metricsWithData.map((m) => html`<option key=${m} value=${m}>${cap(m)}</option>`)}
             </select>
           </div>
         </div>
-        ${view === "chart"
-          ? html`<${TrendChart} series=${result.series[selMetric]} metric=${selMetric} anomalies=${result.anomalies} />
+        ${shownSeries.labels.length === 0
+          ? html`<div className="empty">No data in the selected date range.</div>`
+          : view === "chart"
+          ? html`<${TrendChart} series=${shownSeries} metric=${selMetric} anomalies=${result.anomalies} />
               <div className="muted" style=${{ fontSize: 12, marginTop: 8 }}>Coloured points mark detected anomalies. Hover for details.</div>`
-          : html`<${TrendTable} series=${result.series[selMetric]} metric=${selMetric} anomalies=${result.anomalies} />`}
+          : html`<${TrendTable} series=${shownSeries} metric=${selMetric} anomalies=${result.anomalies} />`}
       </div>`}
 
       <div>
