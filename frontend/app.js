@@ -23,7 +23,6 @@ function fmtNum(n) {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(n);
 }
 const cap = (s) => (s || "").replace(/[_\-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const insId = (metric, date) => "ins-" + (metric + "-" + date).replace(/[^A-Za-z0-9]+/g, "-");
 
 /* Meesho Grocery logo (official lockup) */
 function MGLogo({ size = 36 }) {
@@ -398,6 +397,8 @@ function Dashboard({ result }) {
   const maxDate = allLabels[allLabels.length - 1] || "";
   const [fromDate, setFromDate] = useState(minDate);
   const [toDate, setToDate] = useState(maxDate);
+  const [openAnom, setOpenAnom] = useState({});
+  const toggleAnom = (k) => setOpenAnom((o) => ({ ...o, [k]: !o[k] }));
   const filterByDate = (s) => {
     if (!s) return { labels: [], values: [] };
     const o = { labels: [], values: [] };
@@ -413,11 +414,6 @@ function Dashboard({ result }) {
   const listed = shownAnomalies.slice(0, 24);
   const insByKey = {};
   (result.insights || []).forEach((i) => { insByKey[i.metric + "|" + i.date] = i; });
-  function goToInsight(a) {
-    setSelMetric(a.metric);
-    const el = document.getElementById(insId(a.metric, a.date));
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -482,55 +478,47 @@ function Dashboard({ result }) {
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
           <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ranked by recency & severity</span>
         </div>
-        ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click any anomaly to jump to its root cause ↓</div>`}
+        ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click an anomaly to expand its root cause ▾</div>`}
         ${shownAnomalies.length === 0
           ? html`<div className="card empty">✓ ${rangeActive ? "No anomalies in the selected date range." : "No significant day-on-day anomalies in this view. Metrics moved within normal ranges."}</div>`
           : html`<div className="anoms">
-              ${listed.map(
-                (a, i) => html`<div key=${i} className="card anom" onClick=${() => goToInsight(a)} style=${{ cursor: "pointer" }} title="Click to see the root cause">
-                  <div className=${"sev-bar sev-" + a.severity}></div>
-                  <div>
-                    <div><span className="metricname">${cap(a.metric)}</span>
-                      <span className=${"badge " + a.severity} style=${{ marginLeft: 8 }}>${a.severity}</span>
-                      ${a.is_latest && html`<span className="badge moderate" style=${{ marginLeft: 6 }}>latest day</span>`}
+              ${listed.map((a, i) => {
+                const key = a.metric + "|" + a.date;
+                const isOpen = !!openAnom[key];
+                const ins = insByKey[key];
+                return html`<div key=${i} className="card anom-card">
+                  <div className="anom-head" onClick=${() => toggleAnom(key)}>
+                    <div className=${"sev-bar sev-" + a.severity}></div>
+                    <div>
+                      <div><span className="metricname">${cap(a.metric)}</span>
+                        <span className=${"badge " + a.severity} style=${{ marginLeft: 8 }}>${a.severity}</span>
+                        ${a.is_latest && html`<span className="badge moderate" style=${{ marginLeft: 6 }}>latest day</span>`}
+                      </div>
+                      <div className="meta">${a.direction === "spike" ? "Spike" : "Drop"} on ${a.date} · ${fmtNum(a.prev_value)} → ${fmtNum(a.value)}</div>
                     </div>
-                    <div className="meta">${a.direction === "spike" ? "Spike" : "Drop"} on ${a.date} · ${fmtNum(a.prev_value)} → ${fmtNum(a.value)}</div>
+                    <div className=${"deltabig " + (a.pct_change > 0 ? "up" : "down")}>${a.pct_change > 0 ? "+" : ""}${a.pct_change}%</div>
+                    <div className="anom-chev">${isOpen ? "▲" : "▼"}</div>
                   </div>
-                  <div className=${"deltabig " + (a.pct_change > 0 ? "up" : "down")}>${a.pct_change > 0 ? "+" : ""}${a.pct_change}%</div>
-                </div>`
-              )}
+                  ${isOpen && ins && html`<div className="anom-body">
+                    <div className="rowflex" style=${{ marginBottom: 2 }}>
+                      <div className="tag">Root cause</div>
+                      <span className=${"conf " + (ins.confidence || "medium")}>${ins.confidence || "medium"} confidence</span>
+                    </div>
+                    <div className="block">
+                      <div className="h">Business impact</div>
+                      <div className="impact">${ins.impact}</div>
+                    </div>
+                    <div className="block">
+                      <div className="h">Recommended next steps</div>
+                      <ul>${(ins.recommendations || []).map((r, j) => html`<li key=${j}>${r}</li>`)}</ul>
+                    </div>
+                  </div>`}
+                  ${isOpen && !ins && html`<div className="anom-body"><div className="muted">No detailed insight available for this anomaly.</div></div>`}
+                </div>`;
+              })}
             </div>`}
       </div>
 
-      ${listed.length > 0 &&
-      html`<div>
-        <div className="section-title">Root-cause insights ${result.mode === "llm" ? "" : "(statistical)"}
-          <span className="hint">Tailored to ${result.division}</span>
-        </div>
-        <div className="stack">
-          ${listed.map((a, i) => {
-            const ins = insByKey[a.metric + "|" + a.date];
-            if (!ins) return null;
-            return html`<div key=${i} id=${insId(ins.metric, ins.date)} className="card insight">
-              <div className="rowflex">
-                <div>
-                  <div className="tag">${cap(ins.metric)} · ${ins.date || ""}</div>
-                  <h4>${ins.title}</h4>
-                </div>
-                <span className=${"conf " + (ins.confidence || "medium")}>${ins.confidence || "medium"} confidence</span>
-              </div>
-              <div className="block">
-                <div className="h">Business impact</div>
-                <div className="impact">${ins.impact}</div>
-              </div>
-              <div className="block">
-                <div className="h">Recommended next steps</div>
-                <ul>${(ins.recommendations || []).map((r, j) => html`<li key=${j}>${r}</li>`)}</ul>
-              </div>
-            </div>`;
-          })}
-        </div>
-      </div>`}
     </div>
   `;
 }
