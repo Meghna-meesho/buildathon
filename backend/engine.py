@@ -206,6 +206,36 @@ def _trend(values):
     return "flat"
 
 
+def _attach_wow(anoms, labels, values, avg):
+    """Attach week-on-week change to each anomaly (week vs previous week)."""
+    if not anoms or not labels:
+        return
+    d0 = _parse_date(labels[0])
+    if d0 is None:
+        return
+    weeks, date_to_wk = {}, {}
+    for lab, v in zip(labels, values):
+        d = _parse_date(lab)
+        if d is None:
+            continue
+        wk = (d - d0).days // 7
+        b = weeks.setdefault(wk, [0.0, 0])
+        b[0] += v
+        b[1] += 1
+        date_to_wk[lab] = wk
+    wk_val = {wk: (t / c if avg else t) for wk, (t, c) in weeks.items()}
+    for a in anoms:
+        wk = date_to_wk.get(a["date"])
+        if wk is None or (wk - 1) not in wk_val:
+            a["wow_change"] = None
+            a["wow_direction"] = None
+            continue
+        cur, prev = wk_val[wk], wk_val[wk - 1]
+        pct = (cur - prev) / abs(prev) * 100 if prev not in (0, 0.0) else 0.0
+        a["wow_change"] = round(pct, 1)
+        a["wow_direction"] = "up" if pct > 0 else "down" if pct < 0 else "flat"
+
+
 def analyze(rows, mapping, sensitivity="medium"):
     """Core analysis: KPIs, per-metric series, and ranked anomalies."""
     date_col = mapping["date_col"]
@@ -238,7 +268,9 @@ def analyze(rows, mapping, sensitivity="medium"):
             "std": round(statistics.pstdev(values), 2),
             "trend": _trend(values),
         })
-        all_anomalies.extend(_detect_anomalies(metric, labels, values, threshold))
+        anoms = _detect_anomalies(metric, labels, values, threshold)
+        _attach_wow(anoms, labels, values, _is_average_metric(metric))
+        all_anomalies.extend(anoms)
 
     # rank: latest first, then by severity magnitude
     sev_rank = {"critical": 3, "high": 2, "moderate": 1}
@@ -409,6 +441,7 @@ def _llm_insights(division, metric_stats, anomalies):
                 "metric": a["metric"], "date": a["date"], "value": a["value"],
                 "prev_value": a["prev_value"], "pct_change": a["pct_change"],
                 "direction": a["direction"], "severity": a["severity"],
+                "week_on_week_change_pct": a.get("wow_change"),
                 "other_metrics_that_moved_same_day": [
                     x["metric"] for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]
                 ],
@@ -422,7 +455,8 @@ def _llm_insights(division, metric_stats, anomalies):
         f"notable the move is):\n\n{json.dumps(payload, indent=2)}\n\n"
         f"Write a 2-3 sentence executive_summary of what changed for the {division} team, "
         f"then one insight per detected anomaly: a short title, 1-2 plain-language likely "
-        f"root causes, a one-sentence business impact, and 2-3 next steps that include "
+        f"root causes, a business impact that summarizes BOTH the day-on-day move and the "
+        f"week-on-week change (week_on_week_change_pct) in one or two short sentences, and 2-3 next steps that include "
         f"checking a related metric (use 'other_metrics_that_moved_same_day' when present, "
         f"otherwise pick the most relevant metric from all_metrics). If no anomalies were "
         f"detected, summarize the trends and return an empty insights list. No statistical "
@@ -466,13 +500,18 @@ def _fallback_insights(division, metric_stats, anomalies):
         recs = [check, f"Confirm the {a['date']} number isn't a data or tracking error."]
 
         sign = "+" if a["pct_change"] > 0 else ""
+        dod_word = "spiked" if a["direction"] == "spike" else "dropped"
+        impact = (f"Day-on-day: {metric_h} {dod_word} {abs(a['pct_change'])}% "
+                  f"({a['prev_value']} → {a['value']}) — a {sev_word[a['severity']]} move.")
+        if a.get("wow_change") is not None:
+            wdir = "up" if a["wow_change"] > 0 else "down" if a["wow_change"] < 0 else "flat"
+            impact += f" Week-on-week: this metric is {wdir} {abs(a['wow_change'])}% vs the prior week."
         insights.append({
             "metric": a["metric"],
             "date": a["date"],
             "title": f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% on {a['date']}",
             "root_causes": root,
-            "impact": f"{metric_h.title()} moved from {a['prev_value']} to {a['value']} — "
-                      f"a {sev_word[a['severity']]} day-on-day change.",
+            "impact": impact,
             "recommendations": recs,
             "confidence": "medium",
         })
