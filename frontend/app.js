@@ -24,16 +24,10 @@ function fmtNum(n) {
 }
 const cap = (s) => (s || "").replace(/[_\-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-/* Meesho Grocery mark (inline SVG — green grocery bag + orange/cream sack) */
+/* Meesho Grocery logo (official lockup) */
 function MGLogo({ size = 36 }) {
-  return html`<svg viewBox="0 0 48 48" width=${size} height=${size}
-      style=${{ display: "block" }} role="img" aria-label="Meesho Grocery">
-    <path d="M17 16v-3.2a7 7 0 0 1 14 0V16" fill="none" stroke="#57bb46" stroke-width="3" stroke-linecap="round" />
-    <path d="M9.5 15h29l-2.1 26.2a3 3 0 0 1-3 2.8H14.6a3 3 0 0 1-3-2.8Z" fill="#57bb46" />
-    <path d="M16 33c0-3.4 3.6-6.2 8-6.2s8 2.8 8 6.2z" fill="#f7e3c1" />
-    <rect x="16" y="33" width="16" height="11.2" rx="2.4" fill="#f7961e" />
-    <rect x="16" y="36.6" width="16" height="2.4" fill="#e07d00" />
-  </svg>`;
+  return html`<img src="/mg-logo.png" alt="Meesho Grocery"
+      style=${{ height: size + "px", width: "auto", display: "block" }} />`;
 }
 
 /* ----------------------------- Top bar ----------------------------- */
@@ -44,7 +38,7 @@ function TopBar({ session, onLogout, onReset }) {
         <${MGLogo} size=${38} />
         <div>
           <div className="title">ADD - MG</div>
-          <div className="subtitle">Anomaly Detection Dashboard · Meesho Grocery</div>
+          <div className="subtitle">Anomaly Detection Dashboard</div>
         </div>
       </div>
       ${session &&
@@ -94,10 +88,9 @@ function Login({ onLogin }) {
     <div className="center-wrap">
       <form className="card login-card" onSubmit=${submit}>
         <div className="login-head">
-          <div style=${{ display: "flex", justifyContent: "center", marginBottom: 6 }}>
-            <${MGLogo} size=${56} />
+          <div style=${{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
+            <${MGLogo} size=${64} />
           </div>
-          <div className="wordmark"><span className="wm-meesho">meesho</span> <span className="wm-grocery">grocery</span></div>
           <h1>Welcome to ADD - MG</h1>
           <p>Anomaly Detection Dashboard — sign in and pick your division to see the day-on-day anomalies that matter to you.</p>
         </div>
@@ -453,7 +446,7 @@ function Dashboard({ result }) {
 
       <div>
         <div className="section-title">Detected anomalies
-          <span className="hint">${result.anomalies.length} flagged · ranked by recency &amp; severity</span>
+          <span className="hint">${result.anomalies.length} flagged · most recent and biggest changes first</span>
         </div>
         ${result.anomalies.length === 0
           ? html`<div className="card empty">✓ No significant day-on-day anomalies in this view. Metrics moved within normal ranges.</div>`
