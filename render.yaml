@@ -1,0 +1,17 @@
+# Render Blueprint — deploys Insight Lens as a free Python web service.
+# One-click: in Render, click New + → Blueprint → connect this repo.
+# (Or set the same values by hand via New + → Web Service — see README/steps.)
+services:
+  - type: web
+    name: insight-lens
+    runtime: python
+    plan: free
+    region: singapore                 # closest Render region to India
+    buildCommand: pip install -r requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-4-8         # switch to claude-sonnet-5 to save tokens
+      - key: ANTHROPIC_API_KEY
+        sync: false                    # set this secret in the Render dashboard (optional)
