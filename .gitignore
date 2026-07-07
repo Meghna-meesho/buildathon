@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+
+# Local env / secrets (never commit your API key)
+.env
+*.local
+
+# Editor
+.vscode/
+.idea/
