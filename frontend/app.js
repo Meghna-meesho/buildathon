@@ -425,19 +425,6 @@ function Dashboard({ result }) {
   const [openAnom, setOpenAnom] = useState({});
   const toggleAnom = (k) => setOpenAnom((o) => ({ ...o, [k]: !o[k] }));
   const [gran, setGran] = useState("daily");
-  const weekly = gran === "weekly" ? toWeekly(shownSeries, isAvgMetric(selMetric)) : null;
-  const displaySeries = weekly ? { labels: weekly.labels, values: weekly.values } : shownSeries;
-  let displayAnoms = result.anomalies;
-  if (weekly) {
-    const sevRank = { moderate: 1, high: 2, critical: 3 };
-    const byWeek = {};
-    result.anomalies.filter((a) => a.metric === selMetric && inRange(a.date)).forEach((a) => {
-      const ws = weekly.dateToWeek[a.date];
-      if (!ws) return;
-      if (!byWeek[ws] || sevRank[a.severity] > sevRank[byWeek[ws].severity]) byWeek[ws] = { ...a, date: ws };
-    });
-    displayAnoms = Object.values(byWeek);
-  }
   const filterByDate = (s) => {
     if (!s) return { labels: [], values: [] };
     const o = { labels: [], values: [] };
@@ -453,6 +440,20 @@ function Dashboard({ result }) {
   const listed = shownAnomalies.slice(0, 24);
   const insByKey = {};
   (result.insights || []).forEach((i) => { insByKey[i.metric + "|" + i.date] = i; });
+
+  const weekly = gran === "weekly" ? toWeekly(shownSeries, isAvgMetric(selMetric)) : null;
+  const displaySeries = weekly ? { labels: weekly.labels, values: weekly.values } : shownSeries;
+  let displayAnoms = result.anomalies;
+  if (weekly) {
+    const sevRank = { moderate: 1, high: 2, critical: 3 };
+    const byWeek = {};
+    result.anomalies.filter((a) => a.metric === selMetric && inRange(a.date)).forEach((a) => {
+      const ws = weekly.dateToWeek[a.date];
+      if (!ws) return;
+      if (!byWeek[ws] || sevRank[a.severity] > sevRank[byWeek[ws].severity]) byWeek[ws] = { ...a, date: ws };
+    });
+    displayAnoms = Object.values(byWeek);
+  }
 
   const dimLabel = result.dimension_col
     ? ` · ${result.dimension_col}: ${result.dimension_value && result.dimension_value !== "__all__" ? result.dimension_value : "All"}`
@@ -557,6 +558,22 @@ function Dashboard({ result }) {
 }
 
 /* ----------------------------- App shell ----------------------------- */
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("Render error:", err, info); }
+  render() {
+    if (this.state.err) {
+      return html`<div className="wrap"><div className="card pad">
+        <h3 style=${{ marginTop: 0 }}>Something went wrong rendering this view.</h3>
+        <p className="muted">Please try again or start a new analysis. Details:</p>
+        <pre style=${{ whiteSpace: "pre-wrap", color: "var(--critical)", fontSize: 12 }}>${String((this.state.err && this.state.err.stack) || this.state.err)}</pre>
+      </div></div>`;
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   const [session, setSession] = useState(() => {
     try { return JSON.parse(localStorage.getItem("il_session") || "null"); } catch { return null; }
@@ -575,7 +592,7 @@ function App() {
   return html`
     <div>
       <${TopBar} session=${session} onLogout=${logout} onReset=${result ? reset : null} />
-      ${body}
+      ${React.createElement(ErrorBoundary, null, body)}
     </div>
   `;
 }
