@@ -378,6 +378,114 @@ _RELATED_KEYS = {
 }
 
 
+# What a move MEANS for the business + concrete things to check, per metric.
+# Keyed by a substring of the metric name (specific keys must precede generic "order").
+_DOMAIN = {
+    "gmv": {
+        "up": "revenue jumped — usually a demand surge, a richer basket mix, or a promo landing",
+        "down": "revenue dropped — usually softer demand, a pricing issue, or checkout/payment friction",
+        "actions": ["Split GMV into orders × average order value to see which side moved.",
+                    "Check for pricing, promo, or payment/checkout changes on this date."],
+    },
+    "revenue": {
+        "up": "revenue jumped — usually a demand surge, a richer mix, or a promo landing",
+        "down": "revenue dropped — usually softer demand, pricing, or checkout friction",
+        "actions": ["Split revenue into volume × value to see which side moved.",
+                    "Check pricing, promo, or payment changes on this date."],
+    },
+    "completion": {
+        "up": "more orders were successfully delivered/picked up — delivery reliability improved",
+        "down": "fewer orders reached customers — a hit to delivery reliability and customer experience",
+        "actions": ["Check RTO% and cancellations for the same day — a completion drop usually surfaces there.",
+                    "Look for pickup-point unavailability or crates not collected within the pickup window."],
+    },
+    "rto": {
+        "up": "more orders are being returned — higher reverse-logistics cost, stranded stock, and CX risk",
+        "down": "returns eased — lower cost and better fulfilment",
+        "actions": ["Check completion rate and pickup-point availability for the same day.",
+                    "See whether crates aged out (weren't collected in time) on this date."],
+    },
+    "cancellation": {
+        "up": "more orders cancelled — lost sales and wasted fulfilment effort",
+        "down": "fewer cancellations — smoother fulfilment",
+        "actions": ["Check pickup-point availability/capacity and stock for this date.",
+                    "Compare with completion rate to see how the outcome mix shifted."],
+    },
+    "adoption": {
+        "up": "more eligible users chose self-pickup — the offer and funnel are working",
+        "down": "fewer users opted in — likely a discount change, a comms gap, or the option showing to fewer people",
+        "actions": ["Check whether the first-order discount or comms changed around this date.",
+                    "Check conversion and how many pickup points users were shown."],
+    },
+    "cpdo": {
+        "up": "each delivered order costs more — eroding the margin self-pickup is meant to save",
+        "down": "cost per delivered order fell — better unit economics",
+        "actions": ["Check order density and average pickup distance for this date — fewer nearby active PPs raise cost.",
+                    "Confirm no active pickup points dropped out in the affected polygons."],
+    },
+    "distance": {
+        "up": "users are being routed to farther pickup points — worse convenience and lower pickup likelihood",
+        "down": "average pickup distance shortened — better convenience",
+        "actions": ["Check which nearby pickup points went inactive on this date.",
+                    "Check adoption/conversion to see if the added distance hurt opt-in."],
+    },
+    "shrinkage": {
+        "up": "more items lost or mismatched in handling — direct cost and audit risk",
+        "down": "less shrinkage — cleaner handling",
+        "actions": ["Reconcile RTO / reverse crates for the affected day.",
+                    "Flag the specific pickup points or crates with mismatches for an audit."],
+    },
+    "nps": {
+        "up": "customer sentiment improved",
+        "down": "customer sentiment dipped — often delays, returns, or a support issue",
+        "actions": ["Check RTO% and delivery delays for the same period.",
+                    "Read recent complaint / NQD reasons for the affected orders."],
+    },
+    "conversion": {
+        "up": "more visitors converted — a campaign, pricing, or funnel improvement",
+        "down": "fewer visitors converted — checkout friction, pricing, or a campaign ending",
+        "actions": ["Check adoption and traffic for the same day.",
+                    "Look for checkout, pricing, or campaign changes on this date."],
+    },
+    "aov": {
+        "up": "baskets got larger — a richer mix or lighter discounting",
+        "down": "baskets got smaller — a mix shift or heavier discounting",
+        "actions": ["Check basket mix and discount depth for this date.",
+                    "See whether high-value SKUs went out of stock."],
+    },
+    "avg_order": {
+        "up": "baskets got larger — a richer mix or lighter discounting",
+        "down": "baskets got smaller — a mix shift or heavier discounting",
+        "actions": ["Check basket mix and discount depth for this date.",
+                    "See whether high-value SKUs went out of stock."],
+    },
+    "return": {
+        "up": "more returns — a margin and customer-experience hit",
+        "down": "fewer returns — better quality or fit",
+        "actions": ["Check which SKUs or categories drove the returns.",
+                    "Review recent quality, sizing, or description changes."],
+    },
+    "active_user": {
+        "up": "more active users — an acquisition or seasonality tailwind",
+        "down": "fewer active users — acquisition, app performance, or seasonality",
+        "actions": ["Check acquisition spend and app performance for this date.",
+                    "Compare with orders to see if engagement turned into sales."],
+    },
+    "retention": {
+        "up": "more partners/users stayed — a healthier base",
+        "down": "more churn — often payout, effort, or low order density",
+        "actions": ["Check order density and payouts for the affected partners.",
+                    "Review operational effort / load signals around this date."],
+    },
+    "order": {
+        "up": "order volume surged — more traffic, a promo, or better conversion",
+        "down": "order volume dropped — weaker traffic/conversion, stockouts, or a promo ending",
+        "actions": ["Check traffic / active users and conversion for the same day.",
+                    "Look for stockouts or a promo starting/ending on this date."],
+    },
+}
+
+
 def _humanize(name):
     return str(name).replace("_", " ").strip()
 
@@ -454,13 +562,15 @@ def _llm_insights(division, metric_stats, anomalies):
         f"Day-on-day analysis (pct_change is the day-over-day % change; severity is how "
         f"notable the move is):\n\n{json.dumps(payload, indent=2)}\n\n"
         f"Write a 2-3 sentence executive_summary of what changed for the {division} team, "
-        f"then one insight per detected anomaly: a short title, 1-2 plain-language likely "
-        f"root causes, a business impact that summarizes BOTH the day-on-day move and the "
-        f"week-on-week change (week_on_week_change_pct) in one or two short sentences, and 2-3 next steps that include "
-        f"checking a related metric (use 'other_metrics_that_moved_same_day' when present, "
-        f"otherwise pick the most relevant metric from all_metrics). If no anomalies were "
-        f"detected, summarize the trends and return an empty insights list. No statistical "
-        f"jargon; keep it concise."
+        f"then one insight per detected anomaly. For each: a short title; a business impact that "
+        f"FIRST states what the move means for the {division} team (the operational or financial "
+        f"consequence — not a restatement of the raw numbers) and then notes both the day-on-day "
+        f"and week-on-week (week_on_week_change_pct) direction in one or two short sentences; and "
+        f"2-3 SPECIFIC, operational next steps that name concrete things to check (segments, the "
+        f"date, related metrics), including a related metric to compare (use "
+        f"'other_metrics_that_moved_same_day' when present, else the most relevant from all_metrics). "
+        f"Do not use generic filler like 'verify the data is correct'. If no anomalies were detected, "
+        f"summarize the trends and return an empty insights list. No statistical jargon; keep it concise."
     )
     resp = client.messages.create(
         model=MODEL,
@@ -484,33 +594,36 @@ def _fallback_insights(division, metric_stats, anomalies):
     insights = []
     for a in anomalies:  # one insight per detected anomaly
         metric_h = _humanize(a["metric"])
-        cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
+        dom = _lookup(_DOMAIN, a["metric"]) or {}
         others = [_humanize(x["metric"]) for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]]
+        going = "up" if a["direction"] == "spike" else "down"
 
-        root = [f"Most likely {cause}."]
-        if others:
-            root.append(f"{_human_list(others).capitalize()} also moved on {a['date']}, so the causes are probably linked.")
-
-        if others:
-            check = f"Compare with {_human_list(others)} for {a['date']} — they changed on the same day."
-        else:
-            rel = _related_metrics(a["metric"], metric_names)
-            check = (f"Check {_human_list(rel)} for {a['date']} to find the driver."
-                     if rel else f"Check the other metrics for {a['date']} to find the driver.")
-        recs = [check, f"Confirm the {a['date']} number isn't a data or tracking error."]
-
+        # Business impact: what it MEANS for the business, then the trend figures.
+        consequence = dom.get(going) or "moved well outside its normal range and is worth investigating"
         sign = "+" if a["pct_change"] > 0 else ""
-        dod_word = "spiked" if a["direction"] == "spike" else "dropped"
-        impact = (f"Day-on-day: {metric_h} {dod_word} {abs(a['pct_change'])}% "
-                  f"({a['prev_value']} → {a['value']}) — a {sev_word[a['severity']]} move.")
+        impact = f"{consequence[:1].upper()}{consequence[1:]}. Day-on-day {sign}{a['pct_change']}%"
         if a.get("wow_change") is not None:
-            wdir = "up" if a["wow_change"] > 0 else "down" if a["wow_change"] < 0 else "flat"
-            impact += f" Week-on-week: this metric is {wdir} {abs(a['wow_change'])}% vs the prior week."
+            wsign = "+" if a["wow_change"] > 0 else ""
+            impact += f", week-on-week {wsign}{a['wow_change']}%"
+        impact += "."
+
+        # Recommended steps: concrete + metric-specific; lead with same-day co-movers.
+        recs = []
+        if others:
+            recs.append(f"{_human_list(others).capitalize()} also moved on {a['date']} — compare them to pin the shared driver.")
+        recs.extend(dom.get("actions", []))
+        if not recs:
+            rel = _related_metrics(a["metric"], metric_names)
+            recs.append(f"Check {_human_list(rel) or 'the related metrics'} for {a['date']} to find the driver.")
+            recs.append(f"Segment {metric_h} by pickup zone / pincode to localise the {a['direction']}.")
+        recs = recs[:3]
+
+        cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
         insights.append({
             "metric": a["metric"],
             "date": a["date"],
             "title": f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% on {a['date']}",
-            "root_causes": root,
+            "root_causes": [f"Most likely {cause}."],
             "impact": impact,
             "recommendations": recs,
             "confidence": "medium",
