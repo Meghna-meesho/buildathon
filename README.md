@@ -1,4 +1,15 @@
-# Insight Lens — Anomaly Detector & RCA Engine
+---
+title: Pulse MG
+emoji: 📈
+colorFrom: purple
+colorTo: pink
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Anomaly & root-cause intelligence for Meesho Grocery
+---
+
+# Pulse MG — Anomaly Detector & RCA Engine
 
 **The problem.** Business teams share one giant dashboard with dozens of metrics across many tabs. Every division cares about different numbers, and figuring out *what changed day-on-day and why* means manually scanning charts every morning. Most anomalies are noticed late — or not at all.
 
