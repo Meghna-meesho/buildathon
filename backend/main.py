@@ -16,7 +16,26 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from engine import analyze, generate_rca, parse_csv, profile_columns
+from engine import analyze, generate_rca, parse_csv, profile_columns, _parse_date
+
+
+def _filter_rows_by_date(rows, date_col, from_date, to_date):
+    """Keep only rows whose date falls within [from_date, to_date] (inclusive)."""
+    if not date_col or (not from_date and not to_date):
+        return rows
+    fd = _parse_date(from_date) if from_date else None
+    td = _parse_date(to_date) if to_date else None
+    out = []
+    for r in rows:
+        d = _parse_date(r.get(date_col))
+        if d is None:
+            continue
+        if fd and d < fd:
+            continue
+        if td and d > td:
+            continue
+        out.append(r)
+    return out
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
@@ -98,6 +117,8 @@ async def analyze_endpoint(payload: dict):
     mapping = payload.get("mapping") or {}
     division = (payload.get("division") or "your team").strip()
     sensitivity = payload.get("sensitivity", "medium")
+    from_date = payload.get("from_date")
+    to_date = payload.get("to_date")
 
     data = _UPLOADS.get(upload_id)
     if not data:
@@ -107,7 +128,8 @@ async def analyze_endpoint(payload: dict):
     if not mapping.get("metric_cols"):
         raise HTTPException(400, "Select at least one metric column.")
 
-    result = analyze(data["rows"], mapping, sensitivity=sensitivity)
+    rows = _filter_rows_by_date(data["rows"], mapping.get("date_col"), from_date, to_date)
+    result = analyze(rows, mapping, sensitivity=sensitivity)
     rca = generate_rca(division, result)
 
     return {
@@ -118,8 +140,10 @@ async def analyze_endpoint(payload: dict):
         "kpis": result["kpis"],
         "series": result["series"],
         "anomalies": result["anomalies"],
+        "anomalies_weekly": result.get("anomalies_weekly", []),
         "executive_summary": rca["executive_summary"],
         "insights": rca["insights"],
+        "insights_weekly": rca.get("insights_weekly", []),
         "mode": rca["mode"],
         "notice": rca.get("notice"),
     }

@@ -236,6 +236,36 @@ def _attach_wow(anoms, labels, values, avg):
         a["wow_direction"] = "up" if pct > 0 else "down" if pct < 0 else "flat"
 
 
+def _weekly_aggregate(labels, values, avg):
+    """Aggregate a daily series into 7-day windows from the first date.
+    Each week is labelled with the first date present in it (matching the UI's
+    weekly bucketing). Returns (week_labels, week_values)."""
+    if not labels:
+        return [], []
+    d0 = _parse_date(labels[0])
+    if d0 is None:
+        return [], []
+    weeks = {}  # wk_index -> [total, count, first_label]
+    for lab, v in zip(labels, values):
+        d = _parse_date(lab)
+        if d is None:
+            continue
+        wk = (d - d0).days // 7
+        b = weeks.get(wk)
+        if b is None:
+            weeks[wk] = [v, 1, lab]
+        else:
+            b[0] += v
+            b[1] += 1
+    wk_labels, wk_values, wk_counts = [], [], []
+    for wk in sorted(weeks):
+        total, count, first_label = weeks[wk]
+        wk_labels.append(first_label)
+        wk_values.append(round(total / count, 4) if avg else round(total, 4))
+        wk_counts.append(count)
+    return wk_labels, wk_values, wk_counts
+
+
 def analyze(rows, mapping, sensitivity="medium"):
     """Core analysis: KPIs, per-metric series, and ranked anomalies."""
     date_col = mapping["date_col"]
@@ -245,6 +275,7 @@ def analyze(rows, mapping, sensitivity="medium"):
     threshold = _SENSITIVITY.get(sensitivity, 2.5)
 
     kpis, series, all_anomalies, metric_stats = [], {}, [], []
+    all_anomalies_weekly = []
     for metric in metric_cols:
         labels, values = _build_series(rows, date_col, metric, dimension_col, dimension_value)
         if len(values) < 2:
@@ -268,18 +299,35 @@ def analyze(rows, mapping, sensitivity="medium"):
             "std": round(statistics.pstdev(values), 2),
             "trend": _trend(values),
         })
+        avg_metric = _is_average_metric(metric)
         anoms = _detect_anomalies(metric, labels, values, threshold)
-        _attach_wow(anoms, labels, values, _is_average_metric(metric))
+        _attach_wow(anoms, labels, values, avg_metric)
+        for a in anoms:
+            a["period"] = "day"
         all_anomalies.extend(anoms)
+
+        # Week-on-week anomalies: aggregate to weekly buckets, detect on those.
+        wk_labels, wk_values, wk_counts = _weekly_aggregate(labels, values, avg_metric)
+        # For summed metrics, a trailing partial week has a lower total purely
+        # because the week isn't over — drop it so it isn't flagged as a "drop".
+        # "Partial" = the last week has fewer days than the week before it.
+        if not avg_metric and len(wk_counts) >= 2 and wk_counts[-1] < wk_counts[-2]:
+            wk_labels, wk_values = wk_labels[:-1], wk_values[:-1]
+        wanoms = _detect_anomalies(metric, wk_labels, wk_values, threshold)
+        for a in wanoms:
+            a["period"] = "week"
+        all_anomalies_weekly.extend(wanoms)
 
     # rank: latest first, then by severity magnitude
     sev_rank = {"critical": 3, "high": 2, "moderate": 1}
     all_anomalies.sort(key=lambda a: (a["is_latest"], sev_rank[a["severity"]], abs(a["zscore"])), reverse=True)
+    all_anomalies_weekly.sort(key=lambda a: (a["is_latest"], sev_rank[a["severity"]], abs(a["zscore"])), reverse=True)
 
     return {
         "kpis": kpis,
         "series": series,
         "anomalies": all_anomalies,
+        "anomalies_weekly": all_anomalies_weekly,
         "metric_stats": metric_stats,
     }
 
@@ -597,32 +645,42 @@ def _fallback_insights(division, metric_stats, anomalies):
         dom = _lookup(_DOMAIN, a["metric"]) or {}
         others = [_humanize(x["metric"]) for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]]
         going = "up" if a["direction"] == "spike" else "down"
+        weekly = a.get("period") == "week"
+        when = f"the week of {a['date']}" if weekly else a["date"]
 
         # Business impact: what it MEANS for the business, then the trend figures.
         consequence = dom.get(going) or "moved well outside its normal range and is worth investigating"
         sign = "+" if a["pct_change"] > 0 else ""
-        impact = f"{consequence[:1].upper()}{consequence[1:]}. Day-on-day {sign}{a['pct_change']}%"
-        if a.get("wow_change") is not None:
-            wsign = "+" if a["wow_change"] > 0 else ""
-            impact += f", week-on-week {wsign}{a['wow_change']}%"
-        impact += "."
+        if weekly:
+            impact = f"{consequence[:1].upper()}{consequence[1:]}. Week-on-week {sign}{a['pct_change']}%."
+        else:
+            impact = f"{consequence[:1].upper()}{consequence[1:]}. Day-on-day {sign}{a['pct_change']}%"
+            if a.get("wow_change") is not None:
+                wsign = "+" if a["wow_change"] > 0 else ""
+                impact += f", week-on-week {wsign}{a['wow_change']}%"
+            impact += "."
 
-        # Recommended steps: concrete + metric-specific; lead with same-day co-movers.
+        # Recommended steps: concrete + metric-specific; lead with co-movers.
         recs = []
         if others:
-            recs.append(f"{_human_list(others).capitalize()} also moved on {a['date']} — compare them to pin the shared driver.")
+            recs.append(f"{_human_list(others).capitalize()} also moved in {when} — compare them to pin the shared driver."
+                        if weekly else
+                        f"{_human_list(others).capitalize()} also moved on {a['date']} — compare them to pin the shared driver.")
         recs.extend(dom.get("actions", []))
         if not recs:
             rel = _related_metrics(a["metric"], metric_names)
-            recs.append(f"Check {_human_list(rel) or 'the related metrics'} for {a['date']} to find the driver.")
+            recs.append(f"Check {_human_list(rel) or 'the related metrics'} for {when} to find the driver.")
             recs.append(f"Segment {metric_h} by pickup zone / pincode to localise the {a['direction']}.")
         recs = recs[:3]
 
         cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
+        title = (f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% · week of {a['date']}"
+                 if weekly else
+                 f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% on {a['date']}")
         insights.append({
             "metric": a["metric"],
             "date": a["date"],
-            "title": f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% on {a['date']}",
+            "title": title,
             "root_causes": [f"Most likely {cause}."],
             "impact": impact,
             "recommendations": recs,
@@ -641,18 +699,20 @@ def _fallback_insights(division, metric_stats, anomalies):
 
 
 def generate_rca(division, analysis_result):
-    """Return {executive_summary, insights, mode}."""
+    """Return {executive_summary, insights, insights_weekly, mode}."""
     metric_stats = analysis_result["metric_stats"]
     anomalies = analysis_result["anomalies"]
+    anomalies_weekly = analysis_result.get("anomalies_weekly", [])
     if os.getenv("ANTHROPIC_API_KEY"):
         try:
             out = _llm_insights(division, metric_stats, anomalies)
             out["mode"] = "llm"
-            return out
         except Exception:  # noqa: BLE001 — any failure degrades gracefully to stats
             out = _fallback_insights(division, metric_stats, anomalies)
             out["mode"] = "statistical"
-            return out
-    out = _fallback_insights(division, metric_stats, anomalies)
-    out["mode"] = "statistical"
+    else:
+        out = _fallback_insights(division, metric_stats, anomalies)
+        out["mode"] = "statistical"
+    # Weekly insights always via the domain-aware fallback — reliable and cheap.
+    out["insights_weekly"] = _fallback_insights(division, metric_stats, anomalies_weekly)["insights"]
     return out
