@@ -565,21 +565,45 @@ function Dashboard({ result, params }) {
   const toggleAnom = (k) => setOpenAnom((o) => ({ ...o, [k]: !o[k] }));
   const [gran, setGran] = useState("daily");
   const [indexed, setIndexed] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
 
-  // Re-scope the whole analysis (anomalies, insights, KPIs) to the selected range, debounced.
+  // Fetch AI narratives in the background and swap them in (keeps initial render instant).
+  const aiSeq = useRef(0);
+  const loadAI = (from, to) => {
+    if (!result.ai_available || !params) return;
+    const seq = ++aiSeq.current;
+    setAiLoading(true);
+    apiJSON("/api/insights", { ...params, from_date: from, to_date: to })
+      .then((r) => {
+        if (seq !== aiSeq.current) return;
+        setData((d) => ({ ...d, insights: r.insights, insights_weekly: r.insights_weekly, mode: r.mode, model: r.model }));
+      })
+      .catch(() => {})
+      .finally(() => { if (seq === aiSeq.current) setAiLoading(false); });
+  };
+
+  // Re-scope the analysis to the selected range (debounced), then upgrade to AI insights.
   const firstRun = useRef(true);
   useEffect(() => {
-    if (firstRun.current) { firstRun.current = false; return; }
-    if (fromDate === minDate && toDate === maxDate) { setData(result); return; }
-    if (!params) return;
     let cancelled = false;
+    if (firstRun.current) {
+      firstRun.current = false;
+      loadAI(fromDate, toDate);   // upgrade the initial statistical insights to AI
+      return;
+    }
+    const full = fromDate === minDate && toDate === maxDate;
     const t = setTimeout(async () => {
-      setReloading(true);
-      try {
-        const r = await apiJSON("/api/analyze", { ...params, from_date: fromDate, to_date: toDate });
-        if (!cancelled) setData(r);
-      } catch (e) { /* keep previous data on error */ }
-      finally { if (!cancelled) setReloading(false); }
+      if (full) {
+        setData(result);
+      } else if (params) {
+        setReloading(true);
+        try {
+          const r = await apiJSON("/api/analyze", { ...params, from_date: fromDate, to_date: toDate });
+          if (!cancelled) setData(r);
+        } catch (e) { /* keep previous data on error */ }
+        finally { if (!cancelled) setReloading(false); }
+      }
+      if (!cancelled) loadAI(fromDate, toDate);
     }, 450);
     return () => { cancelled = true; clearTimeout(t); };
   }, [fromDate, toDate]);
@@ -597,6 +621,7 @@ function Dashboard({ result, params }) {
   // Weekly insights are always statistical; daily follow the analysis mode.
   const insightMode = gran === "weekly" ? "statistical" : (data.mode || "statistical");
   const insightModel = gran === "weekly" ? null : data.model;
+  const aiUpgrading = aiLoading && gran !== "weekly" && insightMode !== "llm";
   const activeAnoms = gran === "weekly" ? (data.anomalies_weekly || []) : (data.anomalies || []);
   const shownAnomalies = activeAnoms.filter((a) => inRange(a.date));
   const listed = shownAnomalies.slice(0, 24);
@@ -712,12 +737,14 @@ function Dashboard({ result, params }) {
 
       <div>
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
-          <span className=${"mode-badge " + insightMode}
+          <span className=${"mode-badge " + (aiUpgrading || insightMode === "llm" ? "llm" : "statistical")}
             style=${{ marginLeft: 8 }}
-            title=${insightMode === "llm"
-              ? `Narratives written by ${insightModel || "an AI model"} via your gateway, grounded in the detected data.`
+            title=${aiUpgrading
+              ? "Fetching AI-written narratives — showing quick statistical insights until they arrive."
+              : insightMode === "llm"
+              ? `Narratives written by ${insightModel || "an AI model"}, grounded in the detected data.`
               : "Narratives computed by the built-in statistical engine (no AI model configured)."}>
-            ${insightMode === "llm" ? `✨ AI · ${insightModel || "model"}` : "📊 Statistical"}
+            ${aiUpgrading ? "✨ generating AI…" : insightMode === "llm" ? `✨ AI · ${insightModel || "model"}` : "📊 Statistical"}
           </span>
           <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ${periodWord} · ranked by recency & severity${reloading ? " · updating…" : ""}</span>
         </div>
@@ -765,8 +792,68 @@ function Dashboard({ result, params }) {
             </div>`}
       </div>
 
+      <${ChatWidget} params=${params} fromDate=${fromDate} toDate=${toDate} division=${data.division} />
     </div>
   `;
+}
+
+/* Floating chat assistant — grounded Q&A about the metrics & anomalies */
+function ChatWidget({ params, fromDate, toDate, division }) {
+  const [open, setOpen] = useState(false);
+  const [msgs, setMsgs] = useState([]);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const listRef = useRef(null);
+  useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [msgs, open, busy]);
+
+  const send = async () => {
+    const question = q.trim();
+    if (!question || busy || !params) return;
+    const history = msgs.slice(-6);
+    setMsgs((m) => [...m, { role: "user", content: question }]);
+    setQ("");
+    setBusy(true);
+    try {
+      const res = await apiJSON("/api/chat", { ...params, from_date: fromDate, to_date: toDate, question, history });
+      setMsgs((m) => [...m, { role: "assistant", content: res.answer }]);
+    } catch (e) {
+      setMsgs((m) => [...m, { role: "assistant", content: "Sorry — I couldn't answer that (" + e.message + ")." }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const examples = [
+    "Which metric changed the most?",
+    "Why did the biggest anomaly happen?",
+    "How is GMV trending?",
+  ];
+  return html`<div>
+    <button className="chat-fab" onClick=${() => setOpen((o) => !o)} title="Ask about your metrics & anomalies">
+      ${open ? "✕" : "💬"}
+    </button>
+    ${open && html`<div className="chat-panel">
+      <div className="chat-head">
+        <div><strong>Ask Pulse</strong> <span className="muted" style=${{ fontSize: 12 }}>· ${division || "your data"}</span></div>
+        <button className="chat-x" onClick=${() => setOpen(false)}>✕</button>
+      </div>
+      <div className="chat-msgs" ref=${listRef}>
+        ${msgs.length === 0 && html`<div className="chat-hint">
+          Ask about your metrics, trends, or any detected anomaly. Try:
+          <div className="chat-egs">
+            ${examples.map((e, i) => html`<button key=${i} className="chat-eg" onClick=${() => setQ(e)}>${e}</button>`)}
+          </div>
+        </div>`}
+        ${msgs.map((m, i) => html`<div key=${i} className=${"chat-msg " + m.role}>${m.content}</div>`)}
+        ${busy && html`<div className="chat-msg assistant chat-typing">…thinking</div>`}
+      </div>
+      <div className="chat-input">
+        <input value=${q} placeholder="Ask a question…"
+          onKeyDown=${(e) => { if (e.key === "Enter") send(); }}
+          onChange=${(e) => setQ(e.target.value)} />
+        <button onClick=${send} disabled=${busy || !q.trim()}>Send</button>
+      </div>
+    </div>`}
+  </div>`;
 }
 
 /* ----------------------------- App shell ----------------------------- */

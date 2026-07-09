@@ -35,7 +35,7 @@ def _load_dotenv():
 
 _load_dotenv()
 
-from engine import analyze, generate_rca, parse_csv, profile_columns, _parse_date  # noqa: E402
+from engine import analyze, generate_rca, parse_csv, profile_columns, _parse_date, chat_answer, ai_configured  # noqa: E402
 
 
 def _filter_rows_by_date(rows, date_col, from_date, to_date):
@@ -149,7 +149,9 @@ async def analyze_endpoint(payload: dict):
 
     rows = _filter_rows_by_date(data["rows"], mapping.get("date_col"), from_date, to_date)
     result = analyze(rows, mapping, sensitivity=sensitivity)
-    rca = generate_rca(division, result)
+    # Fast path: statistical insights only, so the dashboard renders instantly.
+    # AI narratives are fetched separately via /api/insights and swapped in.
+    rca = generate_rca(division, result, use_llm=False)
 
     return {
         "division": division,
@@ -165,8 +167,126 @@ async def analyze_endpoint(payload: dict):
         "insights_weekly": rca.get("insights_weekly", []),
         "mode": rca["mode"],
         "model": rca.get("model"),
+        "ai_available": ai_configured(),
         "notice": rca.get("notice"),
     }
+
+
+@app.post("/api/insights")
+async def insights_endpoint(payload: dict):
+    """AI-written RCA narratives for the current (date-scoped) view. Called by the UI in the
+    background after the dashboard renders, so the initial load stays instant."""
+    upload_id = payload.get("upload_id")
+    mapping = payload.get("mapping") or {}
+    division = (payload.get("division") or "your team").strip()
+    sensitivity = payload.get("sensitivity", "medium")
+    from_date = payload.get("from_date")
+    to_date = payload.get("to_date")
+
+    data = _UPLOADS.get(upload_id)
+    if not data:
+        raise HTTPException(404, "Upload not found or expired. Please re-upload the CSV.")
+    if not mapping.get("date_col") or not mapping.get("metric_cols"):
+        raise HTTPException(400, "Analysis mapping is required.")
+
+    rows = _filter_rows_by_date(data["rows"], mapping.get("date_col"), from_date, to_date)
+    result = analyze(rows, mapping, sensitivity=sensitivity)
+    rca = generate_rca(division, result, use_llm=True)
+    return {
+        "executive_summary": rca["executive_summary"],
+        "insights": rca["insights"],
+        "insights_weekly": rca.get("insights_weekly", []),
+        "mode": rca["mode"],
+        "model": rca.get("model"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Chat — grounded Q&A about the metrics & anomalies
+# --------------------------------------------------------------------------- #
+def _chat_context(result, division, from_date, to_date):
+    """Compact, model-friendly snapshot of the (date-scoped) analysis for grounding."""
+    ms = result.get("metric_stats", [])
+    series = result.get("series", {})
+
+    def slim(a):
+        return {
+            "metric": a.get("metric"), "date": a.get("date"),
+            "pct_change": a.get("pct_change"), "direction": a.get("direction"),
+            "severity": a.get("severity"), "period": a.get("period"),
+            "week_on_week_change_pct": a.get("wow_change"),
+            "segments": (a.get("segments") or [])[:3],
+            "co_movers": a.get("co_movers"),
+            "volume_vs_value": a.get("decomposition"),
+        }
+
+    trimmed = {m: {"labels": s.get("labels", [])[-120:], "values": s.get("values", [])[-120:]}
+               for m, s in series.items()}
+    labels0 = series.get(ms[0]["metric"], {}).get("labels", []) if ms else []
+    return {
+        "division": division,
+        "date_range": [from_date or (labels0[0] if labels0 else None),
+                       to_date or (labels0[-1] if labels0 else None)],
+        "metrics": [
+            {"metric": m["metric"], "latest": m["latest"], "previous": m["prev"],
+             "average": m["mean"], "day_on_day_pct": m["dod_change_pct"], "trend": m["trend"]}
+            for m in ms
+        ],
+        "series_recent": trimmed,
+        "daily_anomalies": [slim(a) for a in result.get("anomalies", [])[:20]],
+        "weekly_anomalies": [slim(a) for a in result.get("anomalies_weekly", [])[:20]],
+    }
+
+
+def _chat_fallback(context, question):
+    """A helpful canned answer when no LLM is configured."""
+    da = context.get("daily_anomalies", [])
+    metrics = context.get("metrics", [])
+    parts = ["The AI assistant isn't configured, but here's what the data shows:"]
+    if da:
+        a = da[0]
+        parts.append(f"{len(da)} day-on-day anomaly(ies) were detected — the biggest is "
+                     f"{a['metric']} {a['direction']} {a['pct_change']}% on {a['date']}.")
+    else:
+        parts.append("no day-on-day anomalies were detected in this view.")
+    rising = [m["metric"] for m in metrics if m["trend"] == "rising"][:3]
+    falling = [m["metric"] for m in metrics if m["trend"] == "falling"][:3]
+    if rising:
+        parts.append("Rising: " + ", ".join(rising) + ".")
+    if falling:
+        parts.append("Falling: " + ", ".join(falling) + ".")
+    parts.append("Set an LLM gateway/API key to enable full conversational answers.")
+    return " ".join(parts)
+
+
+@app.post("/api/chat")
+async def chat_endpoint(payload: dict):
+    upload_id = payload.get("upload_id")
+    mapping = payload.get("mapping") or {}
+    division = (payload.get("division") or "your team").strip()
+    sensitivity = payload.get("sensitivity", "medium")
+    question = (payload.get("question") or "").strip()
+    history = payload.get("history") or []
+    from_date = payload.get("from_date")
+    to_date = payload.get("to_date")
+
+    if not question:
+        raise HTTPException(400, "Please ask a question.")
+    data = _UPLOADS.get(upload_id)
+    if not data:
+        raise HTTPException(404, "Upload not found or expired. Please re-upload the CSV.")
+    if not mapping.get("date_col") or not mapping.get("metric_cols"):
+        raise HTTPException(400, "Analysis mapping is required.")
+
+    rows = _filter_rows_by_date(data["rows"], mapping.get("date_col"), from_date, to_date)
+    result = analyze(rows, mapping, sensitivity=sensitivity)
+    context = _chat_context(result, division, from_date, to_date)
+    try:
+        answer, model = chat_answer(division, context, history, question)
+        mode = "llm"
+    except Exception:  # noqa: BLE001 — degrade gracefully
+        answer, model, mode = _chat_fallback(context, question), None, "statistical"
+    return {"answer": answer, "mode": mode, "model": model}
 
 
 @app.post("/api/dimension-values")

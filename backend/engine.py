@@ -809,9 +809,9 @@ def _llm_insights(division, metric_stats, anomalies):
     return _normalize_llm_output(json.loads(text))
 
 
-def _llm_insights_openai(division, metric_stats, anomalies):
-    """Call an OpenAI-compatible gateway (e.g. Bifrost) for RCA insights, using only
-    the stdlib so no extra dependency is needed. Raises on failure (caller falls back)."""
+def _post_gateway(body, timeout=90):
+    """POST a chat-completions body to the configured OpenAI-compatible gateway and
+    return the parsed JSON response. Uses only the stdlib (+ certifi for CA certs)."""
     import ssl
     import urllib.request
     import urllib.error
@@ -825,6 +825,22 @@ def _llm_insights_openai(division, metric_stats, anomalies):
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
+    req = urllib.request.Request(
+        LLM_GATEWAY_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"gateway HTTP {e.code}: {e.read()[:200]!r}")
+
+
+def _llm_insights_openai(division, metric_stats, anomalies):
+    """Call an OpenAI-compatible gateway (e.g. Bifrost) for RCA insights.
+    Raises on failure (caller falls back)."""
     payload = _llm_payload(division, metric_stats, anomalies)
     user = _llm_user_text(division, payload, want_json_shape=True)
     body = {
@@ -836,17 +852,7 @@ def _llm_insights_openai(division, metric_stats, anomalies):
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
     }
-    req = urllib.request.Request(
-        LLM_GATEWAY_URL,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"gateway HTTP {e.code}: {e.read()[:200]!r}")
+    data = _post_gateway(body)
     content = data["choices"][0]["message"]["content"]
     if isinstance(content, str):
         content = content.strip()
@@ -854,6 +860,49 @@ def _llm_insights_openai(division, metric_stats, anomalies):
             content = content.strip("`")
             content = content[content.find("{"):content.rfind("}") + 1]
     return _normalize_llm_output(json.loads(content))
+
+
+_CHAT_SYSTEM = (
+    "You are Pulse, a friendly data-analyst assistant for an Indian e-commerce team. "
+    "Answer the user's question ONLY from the DATA SNAPSHOT provided (metrics, their recent "
+    "values and trends, and detected anomalies with their evidence). Rules:\n"
+    "- Be concise and use plain business language — no statistical jargon (no 'z-score', "
+    "'standard deviation', 'sigma', etc.).\n"
+    "- Cite specific numbers, dates, and segments from the snapshot to support your answer.\n"
+    "- If the snapshot doesn't contain the answer, say so plainly instead of guessing. "
+    "Never invent numbers.\n"
+    "- When asked 'why' about an anomaly, use its segment breakdown, volume/value split, and "
+    "co-moving metrics as the explanation.\n"
+    "- Keep answers to a few sentences unless asked for detail."
+)
+
+
+def chat_answer(division, context, history, question):
+    """Answer a free-text question grounded in the analysis snapshot.
+    Prefers the gateway, then Anthropic; raises if neither is configured (caller falls back)."""
+    system = _CHAT_SYSTEM + f"\n\nThe user is on the {division} team.\n\nDATA SNAPSHOT (JSON):\n" + \
+        json.dumps(context)[:14000]
+    convo = []
+    for h in (history or [])[-6:]:
+        role = "assistant" if h.get("role") == "assistant" else "user"
+        convo.append({"role": role, "content": str(h.get("content", ""))[:2000]})
+    convo.append({"role": "user", "content": str(question)[:2000]})
+
+    if LLM_GATEWAY_URL and LLM_API_KEY:
+        body = {
+            "model": LLM_MODEL,
+            "messages": [{"role": "system", "content": system}] + convo,
+            "temperature": 0.3,
+        }
+        data = _post_gateway(body)
+        return data["choices"][0]["message"]["content"].strip(), LLM_MODEL
+    if os.getenv("ANTHROPIC_API_KEY"):
+        import anthropic
+        client = anthropic.Anthropic()
+        resp = client.messages.create(model=MODEL, max_tokens=1000, system=system, messages=convo)
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+        return text, MODEL
+    raise RuntimeError("no LLM configured for chat")
 
 
 def _sgn(p):
@@ -952,22 +1001,28 @@ def _fallback_insights(division, metric_stats, anomalies):
     return {"executive_summary": summary, "insights": insights}
 
 
-def generate_rca(division, analysis_result):
+def ai_configured():
+    """True if an LLM (gateway or Anthropic) is available for AI narratives."""
+    return bool((LLM_GATEWAY_URL and LLM_API_KEY) or os.getenv("ANTHROPIC_API_KEY"))
+
+
+def generate_rca(division, analysis_result, use_llm=True):
     """Return {executive_summary, insights, insights_weekly, mode, model}.
-    Narrative source, in order of preference: OpenAI-compatible gateway (if configured)
-    → Anthropic (if a key is set) → statistical fallback. Any failure degrades gracefully."""
+    With use_llm=False, returns the fast statistical insights only (no network) — used for
+    the instant initial render. With use_llm=True, narrative source order is: OpenAI-compatible
+    gateway → Anthropic → statistical fallback. Any failure degrades gracefully."""
     metric_stats = analysis_result["metric_stats"]
     anomalies = analysis_result["anomalies"]
     anomalies_weekly = analysis_result.get("anomalies_weekly", [])
 
     out, mode, model = None, "statistical", None
-    if LLM_GATEWAY_URL and LLM_API_KEY:
+    if use_llm and LLM_GATEWAY_URL and LLM_API_KEY:
         try:
             out = _llm_insights_openai(division, metric_stats, anomalies)
             mode, model = "llm", LLM_MODEL
         except Exception:  # noqa: BLE001
             out = None
-    if out is None and os.getenv("ANTHROPIC_API_KEY"):
+    if out is None and use_llm and os.getenv("ANTHROPIC_API_KEY"):
         try:
             out = _llm_insights(division, metric_stats, anomalies)
             mode, model = "llm", MODEL
