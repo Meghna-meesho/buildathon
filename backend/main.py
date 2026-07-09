@@ -16,7 +16,26 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from engine import analyze, generate_rca, parse_csv, profile_columns, _parse_date
+
+def _load_dotenv():
+    """Load KEY=VALUE lines from a gitignored .env at the project root, if present.
+    Runs before importing `engine` so its config picks up the values. Never commit .env —
+    on Hugging Face, set these as Space secrets/variables instead."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
+from engine import analyze, generate_rca, parse_csv, profile_columns, _parse_date  # noqa: E402
 
 
 def _filter_rows_by_date(rows, date_col, from_date, to_date):
@@ -145,6 +164,7 @@ async def analyze_endpoint(payload: dict):
         "insights": rca["insights"],
         "insights_weekly": rca.get("insights_weekly", []),
         "mode": rca["mode"],
+        "model": rca.get("model"),
         "notice": rca.get("notice"),
     }
 

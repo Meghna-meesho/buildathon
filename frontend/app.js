@@ -594,6 +594,9 @@ function Dashboard({ result, params }) {
   const rangeActive = fromDate !== minDate || toDate !== maxDate;
   const inRange = (d) => (!fromDate || d >= fromDate) && (!toDate || d <= toDate);
   const periodWord = gran === "weekly" ? "week-on-week" : "day-on-day";
+  // Weekly insights are always statistical; daily follow the analysis mode.
+  const insightMode = gran === "weekly" ? "statistical" : (data.mode || "statistical");
+  const insightModel = gran === "weekly" ? null : data.model;
   const activeAnoms = gran === "weekly" ? (data.anomalies_weekly || []) : (data.anomalies || []);
   const shownAnomalies = activeAnoms.filter((a) => inRange(a.date));
   const listed = shownAnomalies.slice(0, 24);
@@ -709,6 +712,13 @@ function Dashboard({ result, params }) {
 
       <div>
         <div className="section-title" style=${{ fontSize: 19, fontWeight: 800, color: "var(--plum)" }}>Detected anomalies
+          <span className=${"mode-badge " + insightMode}
+            style=${{ marginLeft: 8 }}
+            title=${insightMode === "llm"
+              ? `Narratives written by ${insightModel || "an AI model"} via your gateway, grounded in the detected data.`
+              : "Narratives computed by the built-in statistical engine (no AI model configured)."}>
+            ${insightMode === "llm" ? `✨ AI · ${insightModel || "model"}` : "📊 Statistical"}
+          </span>
           <span className="hint">${shownAnomalies.length} flagged${rangeActive ? " in range" : ""} · ${periodWord} · ranked by recency & severity${reloading ? " · updating…" : ""}</span>
         </div>
         ${shownAnomalies.length > 0 && html`<div className="muted" style=${{ fontSize: 12, margin: "-2px 0 10px" }}>Click an anomaly to see details</div>`}
@@ -740,6 +750,10 @@ function Dashboard({ result, params }) {
                       <div className="h">Business impact</div>
                       <div className="impact">${ins.impact}</div>
                     </div>
+                    ${(ins.root_causes || []).length > 0 && html`<div className="block">
+                      <div className="h">What the data points to</div>
+                      <ul>${(ins.root_causes || []).map((c, j) => html`<li key=${j}>${c}</li>`)}</ul>
+                    </div>`}
                     <div className="block">
                       <div className="h">Recommended next steps</div>
                       <ul>${(ins.recommendations || []).map((r, j) => html`<li key=${j}>${r}</li>`)}</ul>

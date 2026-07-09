@@ -266,6 +266,124 @@ def _weekly_aggregate(labels, values, avg):
     return wk_labels, wk_values, wk_counts
 
 
+# ----------------------------------------------------------------------------
+# Data-driven RCA context — computed from the actual numbers, per anomaly
+# ----------------------------------------------------------------------------
+
+def _dod_on_date(series, date):
+    """The day-over-day change of a metric on a specific date."""
+    labels, values = series["labels"], series["values"]
+    try:
+        i = labels.index(date)
+    except ValueError:
+        return None
+    if i == 0:
+        return None
+    cur, prev = values[i], values[i - 1]
+    pct = (cur - prev) / abs(prev) * 100 if prev else 0.0
+    return {"value": round(cur, 2), "prev": round(prev, 2), "pct_change": round(pct, 1)}
+
+
+def _co_movers(metric, date, series_map, top=3, min_pct=8.0):
+    """Other metrics that also moved notably the same day, ranked by size of move."""
+    out = []
+    for m, s in series_map.items():
+        if m == metric:
+            continue
+        d = _dod_on_date(s, date)
+        if d and abs(d["pct_change"]) >= min_pct:
+            out.append({"metric": m, "pct_change": d["pct_change"]})
+    out.sort(key=lambda x: abs(x["pct_change"]), reverse=True)
+    return out[:top]
+
+
+def _find_metric(series_map, includes=(), excludes=()):
+    for m in series_map:
+        lo = m.lower()
+        if all(k in lo for k in includes) and not any(k in lo for k in excludes):
+            return m
+    return None
+
+
+def _decompose(metric, date, series_map):
+    """Attribute a GMV/revenue move to volume (orders) vs value (AOV)."""
+    if not any(k in metric.lower() for k in ("gmv", "revenue", "sales")):
+        return None
+    vol = _find_metric(series_map, includes=("order",), excludes=("value", "avg", "aov", "cancel", "return"))
+    val = (_find_metric(series_map, includes=("aov",)) or
+           _find_metric(series_map, includes=("average", "order")) or
+           _find_metric(series_map, includes=("avg", "order")) or
+           _find_metric(series_map, includes=("order", "value")))
+    dv = _dod_on_date(series_map[vol], date) if vol else None
+    da = _dod_on_date(series_map[val], date) if val else None
+    if not (dv and da):
+        return None
+    return {"volume_metric": vol, "volume_pct": dv["pct_change"],
+            "value_metric": val, "value_pct": da["pct_change"]}
+
+
+def _segment_breakdown(rows, date_col, metric, dimension_col, date, prev_date, avg):
+    """Per-segment change on `date` vs `prev_date` — reveals which segment drove the move."""
+    if not dimension_col or not prev_date:
+        return []
+    segs = {}
+    for r in rows:
+        d = _parse_date(r.get(date_col))
+        if d is None:
+            continue
+        ds = d.strftime("%Y-%m-%d")
+        if ds != date and ds != prev_date:
+            continue
+        v = _parse_number(r.get(metric))
+        if v is None:
+            continue
+        seg = str(r.get(dimension_col)).strip() or "(blank)"
+        b = segs.setdefault(seg, {"cur": [0.0, 0], "prev": [0.0, 0]})
+        k = "cur" if ds == date else "prev"
+        b[k][0] += v
+        b[k][1] += 1
+    out = []
+    for seg, b in segs.items():
+        if b["cur"][1] == 0 or b["prev"][1] == 0:
+            continue
+        cur = b["cur"][0] / b["cur"][1] if avg else b["cur"][0]
+        prev = b["prev"][0] / b["prev"][1] if avg else b["prev"][0]
+        delta = cur - prev
+        pct = (delta / abs(prev) * 100) if prev else 0.0
+        out.append({"segment": seg, "pct_change": round(pct, 1), "delta": delta,
+                    "cur": round(cur, 2), "prev": round(prev, 2)})
+    if not out:
+        return []
+    total = sum(x["delta"] for x in out)
+    for x in out:
+        x["contribution"] = round(x["delta"] / total * 100) if total else 0
+    out.sort(key=lambda x: abs(x["delta"]), reverse=True)
+    return out
+
+
+def _attach_rca(anoms, series_map, rows, date_col, dimension_col, dimension_value):
+    """Attach data-driven RCA context (co-movers, decomposition, segments) to each anomaly."""
+    seg_ok = dimension_col and dimension_value in (None, "", "__all__")
+    for a in anoms:
+        m, date = a["metric"], a["date"]
+        cm = _co_movers(m, date, series_map)
+        if cm:
+            a["co_movers"] = cm
+        dec = _decompose(m, date, series_map)
+        if dec:
+            a["decomposition"] = dec
+        if seg_ok:
+            labels = series_map.get(m, {"labels": []})["labels"]
+            prev_date = None
+            if date in labels:
+                i = labels.index(date)
+                if i > 0:
+                    prev_date = labels[i - 1]
+            segs = _segment_breakdown(rows, date_col, m, dimension_col, date, prev_date, _is_average_metric(m))
+            if segs:
+                a["segments"] = segs
+
+
 def analyze(rows, mapping, sensitivity="medium"):
     """Core analysis: KPIs, per-metric series, and ranked anomalies."""
     date_col = mapping["date_col"]
@@ -318,6 +436,9 @@ def analyze(rows, mapping, sensitivity="medium"):
             a["period"] = "week"
         all_anomalies_weekly.extend(wanoms)
 
+    # Attach data-driven RCA context (co-movers, decomposition, segment breakdown).
+    _attach_rca(all_anomalies, series, rows, date_col, dimension_col, dimension_value)
+
     # rank: latest first, then by severity magnitude
     sev_rank = {"critical": 3, "high": 2, "moderate": 1}
     all_anomalies.sort(key=lambda a: (a["is_latest"], sev_rank[a["severity"]], abs(a["zscore"])), reverse=True)
@@ -337,6 +458,13 @@ def analyze(rows, mapping, sensitivity="medium"):
 # ----------------------------------------------------------------------------
 
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+
+# Optional OpenAI-compatible gateway (e.g. Bifrost). When both URL and key are set,
+# RCA narratives are written by this gateway; otherwise Anthropic (if a key is set),
+# otherwise the statistical fallback.
+LLM_GATEWAY_URL = os.getenv("LLM_GATEWAY_URL", "").strip()
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o").strip()
 
 _SCHEMA = {
     "type": "object",
@@ -578,14 +706,11 @@ def _related_metrics(metric, metric_names):
     return out
 
 
-def _llm_insights(division, metric_stats, anomalies):
-    """Call Claude for RCA insights. Raises on any failure (caller falls back)."""
-    import anthropic  # imported lazily so the app runs without the package for stats-only mode
-
-    client = anthropic.Anthropic()
+def _llm_payload(division, metric_stats, anomalies):
+    """Structured evidence sent to the model — includes the data-driven RCA context."""
     top = anomalies[:15]
     by_date = _by_date(anomalies)
-    payload = {
+    return {
         "division": division,
         "all_metrics": [m["metric"] for m in metric_stats],
         "metric_trends": [
@@ -601,25 +726,75 @@ def _llm_insights(division, metric_stats, anomalies):
                 "other_metrics_that_moved_same_day": [
                     x["metric"] for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]
                 ],
+                # Data-driven RCA evidence computed from the raw numbers:
+                "co_moving_metrics_same_day": a.get("co_movers"),
+                "segment_breakdown": (a.get("segments") or [])[:4],
+                "volume_vs_value_decomposition": a.get("decomposition"),
             }
             for a in top
         ],
     }
-    user = (
+
+
+def _llm_user_text(division, payload, want_json_shape=False):
+    """Shared instruction prompt for both the Anthropic and OpenAI-gateway paths."""
+    text = (
         f"Business division: {division}\n\n"
         f"Day-on-day analysis (pct_change is the day-over-day % change; severity is how "
         f"notable the move is):\n\n{json.dumps(payload, indent=2)}\n\n"
         f"Write a 2-3 sentence executive_summary of what changed for the {division} team, "
-        f"then one insight per detected anomaly. For each: a short title; a business impact that "
+        f"then one insight per detected anomaly. Use the EXACT 'metric' and 'date' strings from each "
+        f"detected anomaly in your insight objects. For each: a short title; a business impact that "
         f"FIRST states what the move means for the {division} team (the operational or financial "
         f"consequence — not a restatement of the raw numbers) and then notes both the day-on-day "
         f"and week-on-week (week_on_week_change_pct) direction in one or two short sentences; and "
         f"2-3 SPECIFIC, operational next steps that name concrete things to check (segments, the "
-        f"date, related metrics), including a related metric to compare (use "
-        f"'other_metrics_that_moved_same_day' when present, else the most relevant from all_metrics). "
+        f"date, related metrics). GROUND the root_causes in the data provided per anomaly: if "
+        f"'segment_breakdown' shows one segment moved far more than others, name it as the likely source; "
+        f"if 'volume_vs_value_decomposition' shows one side dominated (e.g. orders vs AOV), say which drove "
+        f"the move; and cite 'co_moving_metrics_same_day' (with their % changes) as evidence of a shared "
+        f"driver. Point the first next step at whatever the data implicates (the segment / the dominant "
+        f"driver / the strongest co-mover). "
         f"Do not use generic filler like 'verify the data is correct'. If no anomalies were detected, "
         f"summarize the trends and return an empty insights list. No statistical jargon; keep it concise."
     )
+    if want_json_shape:
+        text += (
+            "\n\nRespond with ONLY a valid JSON object (no markdown fences, no prose outside it) of "
+            'exactly this shape: {"executive_summary": "string", "insights": [{"metric": "string", '
+            '"date": "YYYY-MM-DD", "title": "string", "root_causes": ["string"], "impact": "string", '
+            '"recommendations": ["string"], "confidence": "high|medium|low"}]}'
+        )
+    return text
+
+
+def _normalize_llm_output(parsed):
+    """Coerce a model's JSON into the shape the UI expects; raise if unusable."""
+    if not isinstance(parsed, dict) or "insights" not in parsed:
+        raise RuntimeError("LLM response missing 'insights'")
+    out_ins = []
+    for i in (parsed.get("insights") or []):
+        if not isinstance(i, dict) or not i.get("metric") or not i.get("date"):
+            continue
+        out_ins.append({
+            "metric": i["metric"],
+            "date": i["date"],
+            "title": i.get("title") or f"{_humanize(i['metric']).title()} anomaly on {i['date']}",
+            "root_causes": i.get("root_causes") or [],
+            "impact": i.get("impact") or "",
+            "recommendations": i.get("recommendations") or [],
+            "confidence": i.get("confidence") if i.get("confidence") in ("high", "medium", "low") else "medium",
+        })
+    return {"executive_summary": parsed.get("executive_summary") or "", "insights": out_ins}
+
+
+def _llm_insights(division, metric_stats, anomalies):
+    """Call Claude (Anthropic) for RCA insights. Raises on any failure (caller falls back)."""
+    import anthropic  # imported lazily so the app runs without the package for stats-only mode
+
+    client = anthropic.Anthropic()
+    payload = _llm_payload(division, metric_stats, anomalies)
+    user = _llm_user_text(division, payload)
     resp = client.messages.create(
         model=MODEL,
         max_tokens=4000,
@@ -631,19 +806,68 @@ def _llm_insights(division, metric_stats, anomalies):
     text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
     if not text:
         raise RuntimeError("empty LLM response")
-    return json.loads(text)
+    return _normalize_llm_output(json.loads(text))
+
+
+def _llm_insights_openai(division, metric_stats, anomalies):
+    """Call an OpenAI-compatible gateway (e.g. Bifrost) for RCA insights, using only
+    the stdlib so no extra dependency is needed. Raises on failure (caller falls back)."""
+    import ssl
+    import urllib.request
+    import urllib.error
+
+    try:  # use certifi's CA bundle — macOS system Python often lacks root certs
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        ctx = ssl.create_default_context()
+    if os.getenv("LLM_INSECURE_SSL") == "1":  # last-resort escape hatch for internal certs
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    payload = _llm_payload(division, metric_stats, anomalies)
+    user = _llm_user_text(division, payload, want_json_shape=True)
+    body = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        LLM_GATEWAY_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"gateway HTTP {e.code}: {e.read()[:200]!r}")
+    content = data["choices"][0]["message"]["content"]
+    if isinstance(content, str):
+        content = content.strip()
+        if content.startswith("```"):  # strip accidental markdown fences
+            content = content.strip("`")
+            content = content[content.find("{"):content.rfind("}") + 1]
+    return _normalize_llm_output(json.loads(content))
+
+
+def _sgn(p):
+    return ("+" if p > 0 else "") + str(p)
 
 
 def _fallback_insights(division, metric_stats, anomalies):
-    """Plain-language, concise insights when the LLM is unavailable."""
-    metric_names = [m["metric"] for m in metric_stats]
-    by_date = _by_date(anomalies)
-    sev_word = {"critical": "major", "high": "sharp", "moderate": "notable"}
+    """Data-driven, plain-language insights (used when the LLM is unavailable).
+    Root causes and next steps are derived from the actual numbers — which segment
+    drove the move, volume vs value, and which metrics co-moved the same day."""
     insights = []
     for a in anomalies:  # one insight per detected anomaly
         metric_h = _humanize(a["metric"])
         dom = _lookup(_DOMAIN, a["metric"]) or {}
-        others = [_humanize(x["metric"]) for x in by_date.get(a["date"], []) if x["metric"] != a["metric"]]
         going = "up" if a["direction"] == "spike" else "down"
         weekly = a.get("period") == "week"
         when = f"the week of {a['date']}" if weekly else a["date"]
@@ -660,31 +884,61 @@ def _fallback_insights(division, metric_stats, anomalies):
                 impact += f", week-on-week {wsign}{a['wow_change']}%"
             impact += "."
 
-        # Recommended steps: concrete + metric-specific; lead with co-movers.
-        recs = []
-        if others:
-            recs.append(f"{_human_list(others).capitalize()} also moved in {when} — compare them to pin the shared driver."
-                        if weekly else
-                        f"{_human_list(others).capitalize()} also moved on {a['date']} — compare them to pin the shared driver.")
+        # ---- Data-driven root causes (most specific first) ----
+        causes, recs = [], []
+        segs = a.get("segments") or []
+        dec = a.get("decomposition")
+        cms = a.get("co_movers") or []
+
+        if segs:
+            top = segs[0]
+            second = segs[1] if len(segs) > 1 else None
+            share = top.get("contribution", 0)
+            if second and abs(top["pct_change"]) >= 1.5 * (abs(second["pct_change"]) or 1e-9):
+                causes.append(f"Concentrated in {top['segment']} ({_sgn(top['pct_change'])}%), while "
+                              f"{second['segment']} moved only {_sgn(second['pct_change'])}% — the {a['direction']} is not broad-based.")
+            elif 0 < share <= 100:
+                causes.append(f"{top['segment']} is the biggest mover ({_sgn(top['pct_change'])}%), roughly {share}% of the net change"
+                              + (f"; {second['segment']} {_sgn(second['pct_change'])}%." if second else "."))
+            else:
+                causes.append(f"{top['segment']} moved the most ({_sgn(top['pct_change'])}%)"
+                              + (f", {second['segment']} {_sgn(second['pct_change'])}%." if second else "."))
+            recs.append(f"Start with {top['segment']} — it drove the {a['direction']}; check its inputs/ops for {when}.")
+
+        if dec:
+            v_dom = abs(dec["volume_pct"]) >= abs(dec["value_pct"])
+            drv = dec["volume_metric"] if v_dom else dec["value_metric"]
+            causes.append(
+                f"{'Volume' if v_dom else 'Basket-value'}-driven: {_humanize(dec['volume_metric'])} {_sgn(dec['volume_pct'])}% "
+                f"vs {_humanize(dec['value_metric'])} {_sgn(dec['value_pct'])}% — {_humanize(drv)} did most of the work.")
+            recs.append(f"Focus on {_humanize(drv)}; the other side of the equation was roughly flat.")
+
+        if cms:
+            names = ", ".join(f"{_humanize(c['metric'])} {_sgn(c['pct_change'])}%" for c in cms[:2])
+            causes.append(f"Moved together with {names} on {a['date']} — likely a shared driver, not isolated to {metric_h}.")
+            recs.append(f"Cross-check {_humanize(cms[0]['metric'])} for {when} to confirm the common cause.")
+
+        if not causes:
+            cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
+            causes.append(f"No single segment or co-moving metric stood out — most likely {cause}.")
+
         recs.extend(dom.get("actions", []))
         if not recs:
-            rel = _related_metrics(a["metric"], metric_names)
-            recs.append(f"Check {_human_list(rel) or 'the related metrics'} for {when} to find the driver.")
             recs.append(f"Segment {metric_h} by pickup zone / pincode to localise the {a['direction']}.")
-        recs = recs[:3]
+        recs, causes = recs[:4], causes[:3]
 
-        cause = _lookup(_DOMAIN_CAUSE, a["metric"]) or "an operational or demand-side change"
         title = (f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% · week of {a['date']}"
                  if weekly else
                  f"{metric_h.title()} {a['direction']} {sign}{a['pct_change']}% on {a['date']}")
+        conf = "high" if (segs or dec) else ("medium" if cms else "low")
         insights.append({
             "metric": a["metric"],
             "date": a["date"],
             "title": title,
-            "root_causes": [f"Most likely {cause}."],
+            "root_causes": causes,
             "impact": impact,
             "recommendations": recs,
-            "confidence": "medium",
+            "confidence": conf,
         })
 
     if anomalies:
@@ -699,20 +953,32 @@ def _fallback_insights(division, metric_stats, anomalies):
 
 
 def generate_rca(division, analysis_result):
-    """Return {executive_summary, insights, insights_weekly, mode}."""
+    """Return {executive_summary, insights, insights_weekly, mode, model}.
+    Narrative source, in order of preference: OpenAI-compatible gateway (if configured)
+    → Anthropic (if a key is set) → statistical fallback. Any failure degrades gracefully."""
     metric_stats = analysis_result["metric_stats"]
     anomalies = analysis_result["anomalies"]
     anomalies_weekly = analysis_result.get("anomalies_weekly", [])
-    if os.getenv("ANTHROPIC_API_KEY"):
+
+    out, mode, model = None, "statistical", None
+    if LLM_GATEWAY_URL and LLM_API_KEY:
+        try:
+            out = _llm_insights_openai(division, metric_stats, anomalies)
+            mode, model = "llm", LLM_MODEL
+        except Exception:  # noqa: BLE001
+            out = None
+    if out is None and os.getenv("ANTHROPIC_API_KEY"):
         try:
             out = _llm_insights(division, metric_stats, anomalies)
-            out["mode"] = "llm"
-        except Exception:  # noqa: BLE001 — any failure degrades gracefully to stats
-            out = _fallback_insights(division, metric_stats, anomalies)
-            out["mode"] = "statistical"
-    else:
+            mode, model = "llm", MODEL
+        except Exception:  # noqa: BLE001
+            out = None
+    if out is None:
         out = _fallback_insights(division, metric_stats, anomalies)
-        out["mode"] = "statistical"
+        mode, model = "statistical", None
+
+    out["mode"] = mode
+    out["model"] = model
     # Weekly insights always via the domain-aware fallback — reliable and cheap.
     out["insights_weekly"] = _fallback_insights(division, metric_stats, anomalies_weekly)["insights"]
     return out
